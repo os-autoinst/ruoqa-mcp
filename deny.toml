@@ -26,7 +26,6 @@ exceptions = [
 # during the ecosystem's migration). None are fixable via `cargo update`
 # alone; skip the older side so genuinely new duplicates still get flagged.
 skip = [
-    { crate = "base64@0.22.1", reason = "hyper-util/wiremock lag rmcp/serde-saphyr's base64 0.23" },
     { crate = "core-foundation@0.9.4", reason = "system-configuration 0.7 lags rustls-platform-verifier's core-foundation 0.10" },
     { crate = "getrandom@0.2.17", reason = "rust-ini's ordered-multimap/dlv-list lag the rest of the tree" },
     { crate = "hashbrown@0.14.5", reason = "rust-ini's ordered-multimap lags indexmap's hashbrown 0.17" },
