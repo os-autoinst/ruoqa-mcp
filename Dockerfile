@@ -17,7 +17,7 @@ RUN install -d -m 0700 -o 65532 -g 65532 /audit
 
 FROM gcr.io/distroless/static-debian13:nonroot
 ARG VERSION=dev
-LABEL org.opencontainers.image.source="https://github.com/mimi1vx/ruoqa-mcp" \
+LABEL org.opencontainers.image.source="https://github.com/os-autoinst/ruoqa-mcp" \
       org.opencontainers.image.description="MCP server exposing curated, typed tools over the openQA REST API" \
       org.opencontainers.image.licenses="GPL-3.0-or-later" \
       org.opencontainers.image.version="${VERSION}"

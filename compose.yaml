@@ -1,7 +1,7 @@
 services:
   ruoqa-mcp:
-    image: ghcr.io/mimi1vx/ruoqa-mcp:latest
-    # build: .
+    image: ruoqa-mcp
+    build: .
     ports:
       - "8000:8000"
     environment:
