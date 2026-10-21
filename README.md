@@ -1,9 +1,9 @@
 # ruoqa-mcp
 
-<img src="https://raw.githubusercontent.com/mimi1vx/ruoqa-mcp/main/docs/assets/logo.svg"
+<img src="https://raw.githubusercontent.com/os-autoinst/ruoqa-mcp/main/docs/assets/logo.svg"
      align="right" width="130" alt="ruoqa-mcp logo">
 
-[![CI](https://github.com/mimi1vx/ruoqa-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/mimi1vx/ruoqa-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/os-autoinst/ruoqa-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/os-autoinst/ruoqa-mcp/actions/workflows/ci.yml)
 
 An [MCP](https://modelcontextprotocol.io) server that exposes curated,
 typed tools over the [openQA](https://open.qa) REST API. It is built on
@@ -32,8 +32,8 @@ cargo build --release
 ./target/release/ruoqa-mcp
 ```
 
-or run the [container image](#container) with Docker/podman — no Rust
-toolchain required.
+or build and run the [container image](#container) with Docker/podman — no
+local Rust toolchain required.
 
 ## Configuration
 
@@ -464,14 +464,16 @@ Press `Ctrl-C` to stop; the server shuts down cleanly on both transports.
 
 ### Container
 
-The published image (`ghcr.io/mimi1vx/ruoqa-mcp`) is HTTP-only in practice —
-it defaults `OPENQA_MCP_TRANSPORT=http`, binds `0.0.0.0:8000`, and runs as
-`nonroot` on a distroless base with no shell:
+No prebuilt image is published; build it from the bundled `Dockerfile`. The
+image is HTTP-only in practice — it defaults `OPENQA_MCP_TRANSPORT=http`,
+binds `0.0.0.0:8000`, and runs as `nonroot` on a distroless base with no
+shell:
 
 ```sh
+docker build -t ruoqa-mcp .
 docker run -e OPENQA_SERVER=openqa.example.com \
            -e OPENQA_MCP_HTTP_TOKEN=$(openssl rand -hex 32) \
-           -p 8000:8000 ghcr.io/mimi1vx/ruoqa-mcp
+           -p 8000:8000 ruoqa-mcp
 ```
 
 Or with the bundled [`compose.yaml`](compose.yaml):
@@ -497,7 +499,7 @@ Gotchas specific to the image:
   ```sh
   docker run -v ./client.conf:/etc/openqa/client.conf:ro \
              -e OPENQA_MCP_HTTP_TOKEN=... -p 8000:8000 \
-             ghcr.io/mimi1vx/ruoqa-mcp
+             ruoqa-mcp
   ```
 - **Auditing needs a writable volume.** The image ships `/var/lib/ruoqa-mcp`
   owned by `nonroot` (uid 65532) for the audit file; mount a volume there
@@ -511,7 +513,7 @@ Gotchas specific to the image:
   docker run -v ./ca.pem:/etc/ssl/custom/ca.pem:ro \
              -e OPENQA_VERIFY=/etc/ssl/custom/ca.pem \
              -e OPENQA_MCP_HTTP_TOKEN=... -p 8000:8000 \
-             ghcr.io/mimi1vx/ruoqa-mcp
+             ruoqa-mcp
   ```
 
 There is no `/health` endpoint or `HEALTHCHECK` (the distroless base has no
