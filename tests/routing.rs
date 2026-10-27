@@ -270,10 +270,24 @@ fn cases() -> Vec<Case> {
         },
         Case {
             tool: "get_iso_job_stats",
-            args: json!({}),
+            args: json!({
+                "distri": "sle", "version": "15-SP7", "flavor": "Online",
+                "arch": "x86_64", "build": "1.2",
+            }),
             method: "GET",
             path: "/api/v1/isos/job_stats",
-            query: "",
+            query: "distri=sle&version=15-SP7&flavor=Online&arch=x86_64&build=1.2",
+            body: None,
+        },
+        Case {
+            tool: "get_iso_job_stats",
+            args: json!({
+                "distri": "sle", "version": "15-SP7", "flavor": "Online",
+                "arch": "x86_64", "build": "1.2", "additional_jobs_by": "BUILD",
+            }),
+            method: "GET",
+            path: "/api/v1/isos/job_stats",
+            query: "distri=sle&version=15-SP7&flavor=Online&arch=x86_64&build=1.2&additional_jobs_by=BUILD",
             body: None,
         },
         Case {

@@ -188,6 +188,28 @@ pub struct ScheduledProductId {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetIsoJobStats {
+    /// Which configured openQA server to query. Call `list_servers` to
+    /// discover valid values (including aliases like `osd`/`o3`).
+    pub server: String,
+    pub distri: String,
+    pub version: String,
+    pub flavor: String,
+    pub arch: String,
+    pub build: String,
+    /// Glob of job group names to include.
+    #[serde(default)]
+    pub group_glob: Option<String>,
+    /// Glob of job group names to exclude.
+    #[serde(default)]
+    pub not_group_glob: Option<String>,
+    /// Setting by which additional jobs are matched to the product; openQA
+    /// defaults to `SUBMISSION_ID`. Ignored by older openQA servers.
+    #[serde(default)]
+    pub additional_jobs_by: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ParentGroupId {
     /// Which configured openQA server to query. Call `list_servers` to
     /// discover valid values (including aliases like `osd`/`o3`).
@@ -790,19 +812,27 @@ data, save it to a temporary file and process it with jq, e.g. `jq '.jobs[] | se
     }
 
     #[tool(
-        description = "Get job statistics for scheduled products.",
+        description = "Get job statistics for a product (distri/version/flavor/arch/build): latest job \
+per scenario; jobs sharing the product's SUBMISSION_ID (or `additional_jobs_by` setting) included.",
         annotations(read_only_hint = true)
     )]
     async fn get_iso_job_stats(
         &self,
-        Parameters(ServerOnly { server }): Parameters<ServerOnly>,
+        Parameters(args): Parameters<GetIsoJobStats>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let client = self.resolve_server(&server)?;
-        to_result(
-            self.request_json(&ctx, client, Method::GET, &api("isos/job_stats"))
-                .await,
-        )
+        let client = self.resolve_server(&args.server)?;
+        let path = Query::new()
+            .push("distri", Some(args.distri))
+            .push("version", Some(args.version))
+            .push("flavor", Some(args.flavor))
+            .push("arch", Some(args.arch))
+            .push("build", Some(args.build))
+            .push("group_glob", args.group_glob)
+            .push("not_group_glob", args.not_group_glob)
+            .push("additional_jobs_by", args.additional_jobs_by)
+            .finish(&api("isos/job_stats"));
+        to_result(self.request_json(&ctx, client, Method::GET, &path).await)
     }
 
     #[tool(
