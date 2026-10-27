@@ -87,6 +87,14 @@ fn cases() -> Vec<Case> {
             body: None,
         },
         Case {
+            tool: "list_jobs_overview",
+            args: json!({"min_restarts": 2}),
+            method: "GET",
+            path: "/api/v1/jobs/overview",
+            query: "min_restarts=2",
+            body: None,
+        },
+        Case {
             tool: "get_job",
             args: json!({"job_id": 7}),
             method: "GET",
