@@ -1,4 +1,4 @@
-//! Table-driven request-shape check for all 45 registered tools: method,
+//! Table-driven request-shape check for all 49 registered tools: method,
 //! path, query string, and body/form-encoding. `tests/tools.rs` asserts
 //! response handling and edge cases; this file asserts only where and how
 //! each tool's request goes out, so a typo'd `format!` path or a `GET` where
@@ -449,6 +449,52 @@ fn cases() -> Vec<Case> {
             args: json!({"name": "SLE-15-SP6-Online-x86_64-Build1.1-Media1.iso"}),
             method: "POST",
             path: "/api/v1/isos/SLE-15-SP6-Online-x86_64-Build1.1-Media1.iso/cancel",
+            query: "",
+            body: None,
+        },
+        Case {
+            tool: "reserve_worker",
+            args: json!({
+                "worker": "42", "comment": "debug", "duration": "10m",
+                "worker_class": "qemu_x86_64", "force": true,
+            }),
+            method: "POST",
+            path: "/api/v1/workers/42/reservation",
+            query: "",
+            body: Some("comment=debug&duration=10m&worker_class=qemu_x86_64&force=1"),
+        },
+        Case {
+            tool: "reserve_worker",
+            args: json!({"worker": "w1:3", "comment": "debug", "force": false}),
+            method: "POST",
+            path: "/api/v1/workers/w1%3A3/reservation",
+            query: "",
+            body: Some("comment=debug"),
+        },
+        Case {
+            tool: "release_worker",
+            args: json!({"worker": "w1:3"}),
+            method: "DELETE",
+            path: "/api/v1/workers/w1%3A3/reservation",
+            query: "",
+            body: None,
+        },
+        Case {
+            tool: "reserve_worker_host",
+            args: json!({
+                "host": "w1", "comment": "debug", "duration": "1d",
+                "worker_class": "qemu_x86_64", "force": true,
+            }),
+            method: "POST",
+            path: "/api/v1/worker_hosts/w1/reservation",
+            query: "",
+            body: Some("comment=debug&duration=1d&worker_class=qemu_x86_64&force=1"),
+        },
+        Case {
+            tool: "release_worker_host",
+            args: json!({"host": "w1.suse.de"}),
+            method: "DELETE",
+            path: "/api/v1/worker_hosts/w1.suse.de/reservation",
             query: "",
             body: None,
         },

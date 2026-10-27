@@ -850,6 +850,10 @@ mod router_tests {
         "delete_job_comment",
         "create_bug",
         "cancel_scheduled_product",
+        "reserve_worker",
+        "release_worker",
+        "reserve_worker_host",
+        "release_worker_host",
     ];
 
     fn names(router: &ToolRouter<OpenQaServer>) -> BTreeSet<String> {
@@ -872,7 +876,7 @@ mod router_tests {
 
     #[test]
     fn write_router_matches_readme_table() {
-        assert_eq!(WRITE_TOOL_NAMES.len(), 14);
+        assert_eq!(WRITE_TOOL_NAMES.len(), 18);
         let expected: BTreeSet<String> = WRITE_TOOL_NAMES
             .iter()
             .map(std::string::ToString::to_string)
@@ -883,7 +887,7 @@ mod router_tests {
     #[test]
     fn readonly_excludes_write_tools() {
         let full = OpenQaServer::read_tool_router() + OpenQaServer::write_tool_router();
-        assert_eq!(full.list_all().len(), 45);
+        assert_eq!(full.list_all().len(), 49);
     }
 
     // The scope gate reads `read_only_hint`, so an unannotated (or inverted)

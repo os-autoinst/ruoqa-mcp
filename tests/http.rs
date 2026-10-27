@@ -265,7 +265,7 @@ async fn write_token_keeps_the_full_tool_set() {
     let client = connect(addr, Some(WRITE_TOKEN)).await.expect("handshake");
 
     let tools = client.peer().list_all_tools().await.expect("list_tools");
-    assert_eq!(tools.len(), 45);
+    assert_eq!(tools.len(), 49);
 
     let mut params = CallToolRequestParams::new("cancel_job".to_string());
     params = params.with_arguments(
@@ -358,7 +358,7 @@ async fn insecure_no_auth_serves_anonymous_write_calls() {
     let client = connect(addr, None).await.expect("handshake");
 
     let tools = client.peer().list_all_tools().await.expect("list_tools");
-    assert_eq!(tools.len(), 45);
+    assert_eq!(tools.len(), 49);
 
     let mut params = CallToolRequestParams::new("cancel_job".to_string());
     params = params.with_arguments(
