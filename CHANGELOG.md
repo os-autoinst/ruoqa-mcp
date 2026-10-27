@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/os-autoinst/ruoqa-mcp/compare/v0.6.2...v0.7.0) - 2026-10-27
+
+### Added
+
+- *(tools)* add worker and worker-host reservation tools
+- *(tools)* add min_restarts filter to list_jobs_overview
+
+### Fixed
+
+- *(deps)* update lockfile to clear cargo-deny advisories
+- *(tools)* send the required product keys from get_iso_job_stats
+
+### Other
+
+- *(deps)* cargo update
+- document the worker reservation tools
+- document the job-stats keys, min_restarts and comment deletion rules
+- *(tools)* describe who may delete a job comment
+- stop publishing the container image to ghcr.io
+
 ## [0.6.2](https://github.com/os-autoinst/ruoqa-mcp/compare/v0.6.1...v0.6.2) - 2026-10-20
 
 ### Fixed
