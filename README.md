@@ -168,7 +168,7 @@ descriptions for brevity) — see [Environment variables](#environment-variables
 | `list_bugs` | List tracked bugs referenced by jobs. |
 | `search` | Full-text search across jobs, groups, and test modules. |
 | `get_scheduled_product` | Get a scheduled product (result of a prior ISO trigger). |
-| `get_iso_job_stats` | Get job statistics for scheduled products. |
+| `get_iso_job_stats` | Get job statistics for a product: latest job per scenario, plus jobs sharing its `SUBMISSION_ID` (or the `additional_jobs_by` setting). `distri`, `version`, `flavor`, `arch` and `build` are required; `group_glob`, `not_group_glob`, `additional_jobs_by` optional. |
 | `list_group_comments` | List comments on a job group. |
 | `list_parent_group_comments` | List comments on a parent job group. |
 | `list_job_logs` | List a job's downloadable log files and uploaded (ulog) files. |
@@ -181,7 +181,9 @@ descriptions for brevity) — see [Environment variables](#environment-variables
 `state`, `result`, `distri`, `version`, `build`, `test`, `arch`, `machine`,
 `groupid`, `group`, `latest`, `limit`, `ids`. `list_jobs` additionally accepts
 `offset` for pagination (the overview endpoint returns only the latest job per
-scenario and is not paginated). Unset filters are dropped from the request.
+scenario and is not paginated). `list_jobs_overview` additionally accepts
+`min_restarts` (only jobs restarted at least N times; `list_jobs` ignores it
+upstream). Unset filters are dropped from the request.
 `ids` accepts at most 500 entries (each becomes a repeated `ids=` query
 parameter; more would risk a `414` from nginx's default request-line limit).
 
@@ -285,7 +287,7 @@ argument.
 | `add_group_comment` | Add a comment to a job group. |
 | `add_parent_group_comment` | Add a comment to a parent job group. |
 | `update_job_comment` | Update an existing job comment. |
-| `delete_job_comment` | Delete a job comment. |
+| `delete_job_comment` | Delete a job comment. Allowed for the comment's author or an admin; comments carrying a force_result label cannot be deleted (403). |
 | `create_bug` | Create a tracked bug reference. |
 | `cancel_scheduled_product` | Cancel a scheduled product / ISO by name. |
 
