@@ -290,6 +290,10 @@ argument.
 | `delete_job_comment` | Delete a job comment. Allowed for the comment's author or an admin; comments carrying a force_result label cannot be deleted (403). |
 | `create_bug` | Create a tracked bug reference. |
 | `cancel_scheduled_product` | Cancel a scheduled product / ISO by name. |
+| `reserve_worker` | Reserve a worker instance so openQA stops scheduling on it (operator-only). |
+| `release_worker` | Release a worker instance's reservation. |
+| `reserve_worker_host` | Reserve every worker instance of a host (operator-only). |
+| `release_worker_host` | Release a worker host's reservation. |
 
 Mutating tools carry `destructiveHint`/`readOnlyHint` MCP annotations so
 clients can gate them behind confirmation. To drop them entirely, start the
@@ -304,6 +308,18 @@ one id missing its assets) is reported by openQA itself in the response's
 row); individual values stay unbounded to allow an inline
 `SCENARIO_DEFINITIONS_YAML` document. `extra` keys may not collide,
 case-insensitively, with `distri`/`version`/`flavor`/`arch` or with each other.
+
+The reservation tools need an operator account. `reserve_worker` and
+`release_worker` take `worker` as a numeric id or `host:instance`; a host
+containing dots (an FQDN) is rejected locally because openQA's route cannot
+match it, so use the numeric id from `list_workers` instead. The `*_worker_host`
+tools take the host name as is. `comment`, `duration` (`<n>[s|m|h|d]`) and
+`worker_class` are passed through unvalidated: openQA enforces whether a comment
+is required and the default and maximum duration (indefinite, `0`, is
+admin-only). `force` (admin-only, sent as `force=1` only when true) takes over a
+reservation held by another user. Releasing a single instance covered by a host
+reservation only removes that instance's properties; it inherits the host
+reservation again when it re-registers.
 
 ### Errors
 
@@ -377,7 +393,7 @@ authentication is mandatory and deny-by-default. Two tokens define two scopes:
 
 | Token | Scope | Tools |
 | --- | --- | --- |
-| `OPENQA_MCP_HTTP_TOKEN` | write | all 45 read + mutating tools |
+| `OPENQA_MCP_HTTP_TOKEN` | write | all 49 read + mutating tools |
 | `OPENQA_MCP_HTTP_READ_TOKEN` | read | the 31 read tools only |
 
 Either may be set alone. A read-scope caller sees only the read tools in
