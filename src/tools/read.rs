@@ -89,6 +89,10 @@ pub struct ListJobsOverviewArgs {
     pub latest: Option<i64>,
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Only jobs restarted at least this many times (N >= 1; openQA caps
+    /// the chain depth at 10). Ignored by older openQA servers.
+    #[serde(default)]
+    pub min_restarts: Option<i64>,
     #[serde(default)]
     #[schemars(length(max = MAX_IDS))]
     pub ids: Option<Vec<i64>>,
@@ -412,6 +416,7 @@ data, save it to a temporary file and process it with jq, e.g. `jq '.jobs[] | se
             .push("group", args.group)
             .push("latest", args.latest)
             .push("limit", args.limit)
+            .push("min_restarts", args.min_restarts)
             .push_all("ids", args.ids.as_deref())
             .finish(&api("jobs/overview"));
         let body = self.request_json(&ctx, client, Method::GET, &path).await;
