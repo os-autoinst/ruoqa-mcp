@@ -187,6 +187,8 @@ const ARGS_ALLOW: &[&str] = &[
     "member",
     "tool",
     "tier",
+    "worker",
+    "host",
 ];
 
 /// Allow-listed arrays beyond this many elements are summarized instead of
@@ -962,6 +964,17 @@ mod tests {
         assert_eq!(captured["job_id"], 7);
         assert_eq!(captured["text"], "hi");
         assert_eq!(captured["server"], "osd");
+    }
+
+    #[test]
+    fn capture_args_reservation_target_verbatim_comment_redacted() {
+        let args =
+            json!({"worker": "w1:3", "host": "w1.suse.de", "comment": "debugging", "force": true});
+        let captured = capture_args(args.as_object()).unwrap();
+        assert_eq!(captured["worker"], "w1:3");
+        assert_eq!(captured["host"], "w1.suse.de");
+        assert_eq!(captured["force"], true);
+        assert_eq!(captured["comment"], json!({"_len": 9}));
     }
 
     #[test]

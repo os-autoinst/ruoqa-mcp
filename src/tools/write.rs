@@ -1,4 +1,4 @@
-//! The 15 mutating tools (port of the MUTATING section of `server.py`).
+//! The 18 mutating tools (port of the MUTATING section of `server.py`).
 //! `data=` in Python maps to `Client::request_form` (form-encoded, not JSON);
 //! `params=` maps to a query string + `Client::request` with no body.
 
@@ -168,6 +168,74 @@ pub struct CancelScheduledProduct {
     pub name: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReserveWorker {
+    /// Which configured openQA server to query. Call `list_servers` to
+    /// discover valid values (including aliases like `osd`/`o3`).
+    pub server: String,
+    /// Numeric worker id (preferred) or `host:instance`. Dotted hosts are
+    /// not routable upstream; use the numeric id from `list_workers`.
+    pub worker: String,
+    /// Why the worker is reserved; openQA requires it unless configured
+    /// otherwise.
+    #[serde(default)]
+    pub comment: Option<String>,
+    /// `<n>[s|m|h|d]`, e.g. `10m`. openQA applies its configured default
+    /// and limit; `0` (indefinite) is admin-only.
+    #[serde(default)]
+    pub duration: Option<String>,
+    /// Keep the worker schedulable for jobs that explicitly request this
+    /// worker class.
+    #[serde(default)]
+    pub worker_class: Option<String>,
+    /// Admin-only: take over a reservation held by another user.
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReleaseWorker {
+    /// Which configured openQA server to query. Call `list_servers` to
+    /// discover valid values (including aliases like `osd`/`o3`).
+    pub server: String,
+    /// Numeric worker id (preferred) or `host:instance`. Dotted hosts are
+    /// not routable upstream; use the numeric id from `list_workers`.
+    pub worker: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReserveWorkerHost {
+    /// Which configured openQA server to query. Call `list_servers` to
+    /// discover valid values (including aliases like `osd`/`o3`).
+    pub server: String,
+    /// Worker host name; dots (FQDN) are fine here.
+    pub host: String,
+    /// Why the host is reserved; openQA requires it unless configured
+    /// otherwise.
+    #[serde(default)]
+    pub comment: Option<String>,
+    /// `<n>[s|m|h|d]`, e.g. `10m`. openQA applies its configured default
+    /// and limit; `0` (indefinite) is admin-only.
+    #[serde(default)]
+    pub duration: Option<String>,
+    /// Keep the workers schedulable for jobs that explicitly request this
+    /// worker class.
+    #[serde(default)]
+    pub worker_class: Option<String>,
+    /// Admin-only: take over a reservation held by another user.
+    #[serde(default)]
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ReleaseWorkerHost {
+    /// Which configured openQA server to query. Call `list_servers` to
+    /// discover valid values (including aliases like `osd`/`o3`).
+    pub server: String,
+    /// Worker host name; dots (FQDN) are fine here.
+    pub host: String,
+}
+
 /// Blank-after-trim values are not filters: treat them the same as absent.
 fn nonblank(v: Option<String>) -> Option<String> {
     v.filter(|s| !s.trim().is_empty())
@@ -219,6 +287,41 @@ fn path_segment(value: &str) -> Result<String, ErrorData> {
         ));
     }
     Ok(utf8_percent_encode(value, SEGMENT).to_string())
+}
+
+/// Mirrors upstream's `workerid` route: a numeric id or `host:instance`
+/// whose host has no dots (a dotted host never matches the route).
+fn worker_ref(value: &str) -> Result<String, ErrorData> {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let valid = match value.split_once(':') {
+        None => digits(value),
+        Some((host, instance)) => {
+            !host.is_empty() && !host.contains(['/', '.']) && digits(instance)
+        }
+    };
+    if !valid {
+        return Err(ErrorData::invalid_params(
+            format!(
+                "worker {value:?} must be a numeric id or host:instance without dots in the \
+                 host; use the numeric worker id from list_workers"
+            ),
+            None,
+        ));
+    }
+    path_segment(value)
+}
+
+fn reservation_form(
+    comment: Option<String>,
+    duration: Option<String>,
+    worker_class: Option<String>,
+    force: Option<bool>,
+) -> Form {
+    Form::new()
+        .push_opt("comment", comment)
+        .push_opt("duration", duration)
+        .push_opt("worker_class", worker_class)
+        .push_opt("force", force.unwrap_or(false).then_some(1))
 }
 
 #[tool_router(router = write_tool_router, vis = "pub(crate)")]
@@ -624,6 +727,129 @@ carrying a force_result label cannot be deleted (403).",
             .await,
         )
     }
+
+    #[tool(
+        description = "Reserve a worker instance so openQA stops scheduling jobs on it. Operator-only. \
+`comment` is usually required. `duration` is `<n>[s|m|h|d]` (default and maximum come from the \
+server's [worker_reservation] config, typically 5h and 5d; `0` = indefinite, admins only). \
+`worker_class` keeps the worker schedulable for jobs that explicitly request that class. `force` \
+(admin-only) takes over another user's reservation. Returns the reservation. `worker` is a numeric \
+id or `host:instance` (no dots in the host).",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn reserve_worker(
+        &self,
+        Parameters(ReserveWorker {
+            server,
+            worker,
+            comment,
+            duration,
+            worker_class,
+            force,
+        }): Parameters<ReserveWorker>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let client = self.resolve_server(&server)?;
+        let worker = worker_ref(&worker)?;
+        let form = reservation_form(comment, duration, worker_class, force);
+        to_result(
+            self.request_form(
+                &ctx,
+                client,
+                Method::POST,
+                &api(&format!("workers/{worker}/reservation")),
+                &form,
+            )
+            .await,
+        )
+    }
+
+    #[tool(
+        description = "Release the reservation on a worker instance. Operator-only. If a host \
+reservation covers the instance, only this instance's reservation properties are removed and it \
+inherits the host reservation again when it re-registers.",
+        annotations(read_only_hint = false, destructive_hint = true)
+    )]
+    async fn release_worker(
+        &self,
+        Parameters(ReleaseWorker { server, worker }): Parameters<ReleaseWorker>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let client = self.resolve_server(&server)?;
+        let worker = worker_ref(&worker)?;
+        to_result(
+            self.request_json(
+                &ctx,
+                client,
+                Method::DELETE,
+                &api(&format!("workers/{worker}/reservation")),
+            )
+            .await,
+        )
+    }
+
+    #[tool(
+        description = "Reserve every worker instance of a host so openQA stops scheduling jobs on \
+them. Operator-only. Same `comment`, `duration`, `worker_class` and `force` semantics as \
+reserve_worker. Returns the affected `worker_ids`.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn reserve_worker_host(
+        &self,
+        Parameters(ReserveWorkerHost {
+            server,
+            host,
+            comment,
+            duration,
+            worker_class,
+            force,
+        }): Parameters<ReserveWorkerHost>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let client = self.resolve_server(&server)?;
+        let host = path_segment(&host)?;
+        let form = reservation_form(comment, duration, worker_class, force);
+        to_result(
+            self.request_form(
+                &ctx,
+                client,
+                Method::POST,
+                &api(&format!("worker_hosts/{host}/reservation")),
+                &form,
+            )
+            .await,
+        )
+    }
+
+    #[tool(
+        description = "Release the reservation on a worker host. Operator-only.",
+        annotations(read_only_hint = false, destructive_hint = true)
+    )]
+    async fn release_worker_host(
+        &self,
+        Parameters(ReleaseWorkerHost { server, host }): Parameters<ReleaseWorkerHost>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let client = self.resolve_server(&server)?;
+        let host = path_segment(&host)?;
+        to_result(
+            self.request_json(
+                &ctx,
+                client,
+                Method::DELETE,
+                &api(&format!("worker_hosts/{host}/reservation")),
+            )
+            .await,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -664,6 +890,29 @@ mod tests {
         assert!(path_segment("").is_err());
         assert!(path_segment(".").is_err());
         assert!(path_segment("..").is_err());
+    }
+
+    #[test]
+    fn worker_ref_accepts_numeric_id_and_host_instance() {
+        assert_eq!(worker_ref("42").unwrap(), "42");
+        assert_eq!(worker_ref("w1:3").unwrap(), "w1%3A3");
+    }
+
+    #[test]
+    fn worker_ref_rejects_everything_else() {
+        for bad in [
+            "w1.suse.de:3",
+            "w1",
+            "../x",
+            "",
+            ":3",
+            "w1:",
+            "w1:x",
+            "a:b:3",
+            "a/b:3",
+        ] {
+            assert!(worker_ref(bad).is_err(), "{bad:?} should be rejected");
+        }
     }
 
     #[test]
