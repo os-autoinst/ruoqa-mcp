@@ -557,7 +557,8 @@ openQA reports it in the response itself (a `result` map of restarted ids and an
     }
 
     #[tool(
-        description = "Delete a job comment.",
+        description = "Delete a job comment. Allowed for the comment's author or an admin; comments \
+carrying a force_result label cannot be deleted (403).",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn delete_job_comment(
