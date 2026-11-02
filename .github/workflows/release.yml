@@ -5,7 +5,7 @@ name: release
 # `push: tags` nor `release: published` fires for an automated release — this
 # workflow has to be *called* by release-plz.yml instead. The `push: tags`
 # trigger is kept for hand-pushed tags; `workflow_dispatch` is the manual
-# retry path.
+# retry path — dispatch from the tag ("Use workflow from").
 on:
   workflow_call:
     inputs:
@@ -14,13 +14,11 @@ on:
         required: true
         type: string
   workflow_dispatch:
-    inputs:
-      ref:
-        description: Tag to publish from, e.g. v0.1.2.
-        required: true
-        type: string
   push:
     tags: ['v*']
+
+env:
+  TAG: ${{ inputs.ref || github.ref_name }}
 
 jobs:
   # Builds first, publishes to crates.io last: crates.io can never be
@@ -38,6 +36,20 @@ jobs:
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
     steps:
+      - name: Check release tag
+        env:
+          CALLED_REF: ${{ inputs.ref }}
+          REF_TYPE: ${{ github.ref_type }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CALLED_REF" ] && [ "$REF_TYPE" != tag ]; then
+            echo "::error::Run this workflow from a release tag, not $REF_TYPE '$TAG'."
+            exit 1
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::'$TAG' is not a release tag like v1.2.3."
+            exit 1
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
@@ -47,10 +59,11 @@ jobs:
           toolchain: stable
       - run: cargo build --release --locked
       - name: Package
+        env:
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          TAG="${{ inputs.ref || github.ref_name }}"
-          NAME="ruoqa-mcp-${TAG}-${{ matrix.target }}"
+          NAME="ruoqa-mcp-${TAG}-${TARGET}"
           mkdir "$NAME"
           strip target/release/ruoqa-mcp -o "$NAME/ruoqa-mcp"
           cp README.md COPYING "$NAME/"
@@ -78,10 +91,9 @@ jobs:
       - name: Upload to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          TAG="${{ inputs.ref || github.ref_name }}"
-          REPO="${{ github.repository }}"
           if out=$(gh release view "$TAG" --repo "$REPO" --json tagName 2>&1); then
             echo "::notice::Release $TAG already exists; reusing it."
           elif printf '%s' "$out" | grep -qi 'release not found'; then
