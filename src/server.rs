@@ -22,6 +22,7 @@ use crate::heartbeat::with_heartbeat;
 use crate::http::{Scope, scope_of};
 use crate::otel::{self, traces::SpanCtx};
 use crate::servers::ServerRegistry;
+use crate::tools::MAX_RESULT_BYTES;
 use crate::{MetricRecorder, TraceProducer};
 
 tokio::task_local! {
@@ -433,9 +434,28 @@ fn log_upstream_request(
 
 /// `204 No Content` comes back as `Value::Null`; normalize to `{}` like the
 /// Python did for its raw httpx response.
+///
+/// A result whose serialized size exceeds [`MAX_RESULT_BYTES`] becomes a
+/// `response_too_large` tool error: an oversized message would overflow some
+/// clients' stdio buffer and drop the whole connection.
 pub(crate) fn ok(value: Value) -> Result<CallToolResult, ErrorData> {
     let value = if value.is_null() { json!({}) } else { value };
-    Ok(CallToolResult::success(vec![ContentBlock::json(value)?]))
+    let result = CallToolResult::success(vec![ContentBlock::json(value)?]);
+    let size = serde_json::to_vec(&result)
+        .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
+        .len();
+    if size > MAX_RESULT_BYTES {
+        return tool_error(
+            "response_too_large",
+            None,
+            format!(
+                "result is {size} bytes, over the {MAX_RESULT_BYTES}-byte limit; narrow the \
+                 request (summary, limit, or tail_lines/grep where the tool has them)"
+            ),
+            None,
+        );
+    }
+    Ok(result)
 }
 
 pub(crate) fn to_result(result: ruoqa::Result<Value>) -> Result<CallToolResult, ErrorData> {
@@ -723,6 +743,26 @@ mod tests {
             panic!("expected text content");
         };
         assert_eq!(text.text, "{}");
+    }
+
+    fn error_kind(result: &CallToolResult) -> Value {
+        let ContentBlock::Text(text) = &result.content[0] else {
+            panic!("expected text content");
+        };
+        serde_json::from_str::<Value>(&text.text).unwrap()["error"]["kind"].clone()
+    }
+
+    #[test]
+    fn ok_passes_a_result_under_the_cap_through() {
+        let result = ok(json!({"data": "x".repeat(1024)})).unwrap();
+        assert_eq!(result.is_error, Some(false));
+    }
+
+    #[test]
+    fn ok_turns_a_result_over_the_cap_into_response_too_large() {
+        let result = ok(json!("x".repeat(MAX_RESULT_BYTES))).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(error_kind(&result), "response_too_large");
     }
 
     fn fixture_registry() -> ServerRegistry {

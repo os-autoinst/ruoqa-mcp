@@ -13,6 +13,11 @@ pub(crate) const MAX_RESTART_JOBS: usize = 500;
 /// row; entry *values* stay unbounded (e.g. inline `SCENARIO_DEFINITIONS_YAML`).
 pub(crate) const MAX_EXTRA_ENTRIES: usize = 100;
 
+/// Largest serialized tool result `server::ok` will send. Stays under the
+/// 10 MiB stdio buffer some clients (`OpenCode`) enforce, where a bigger
+/// message drops the connection instead of failing the call.
+pub(crate) const MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
+
 /// Ceiling on both a raw artifact download and its decompressed output.
 /// Matches ruoqa's own `max_response_bytes` default; re-imposed here because
 /// `Client::send_raw`/`execute` bypass that cap entirely.
