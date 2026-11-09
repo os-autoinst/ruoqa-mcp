@@ -254,6 +254,126 @@ async fn list_jobs_overview_summary_rejects_unrelated_object() {
     .await;
 }
 
+async fn mock_job_groups(mock: &MockServer, body: Value) {
+    Mock::given(method("GET"))
+        .and(path("/api/v1/job_groups"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(mock)
+        .await;
+}
+
+fn sample_job_groups() -> Value {
+    json!([
+        {"id": 1, "name": "SLE 15 SP6 Maintenance", "parent_id": 7, "template": "big"},
+        {"id": 2, "name": "Tumbleweed", "parent_id": null, "template": "big"},
+        {"id": 3, "name": "sle micro", "parent_id": null, "template": "big"},
+    ])
+}
+
+#[tokio::test]
+async fn list_job_groups_summary_drops_template() {
+    let mock = MockServer::start().await;
+    mock_job_groups(&mock, sample_job_groups()).await;
+    let client = server_with_mock(&mock, false).await;
+
+    let result = call(&client, "list_job_groups", json!({"summary": true}))
+        .await
+        .expect("call_tool");
+
+    assert_eq!(
+        text(&result),
+        json!([
+            {"id": 1, "name": "SLE 15 SP6 Maintenance", "parent_id": 7},
+            {"id": 2, "name": "Tumbleweed", "parent_id": null},
+            {"id": 3, "name": "sle micro", "parent_id": null},
+        ])
+    );
+}
+
+#[tokio::test]
+async fn list_job_groups_default_returns_rows_unchanged() {
+    let mock = MockServer::start().await;
+    mock_job_groups(&mock, sample_job_groups()).await;
+    let client = server_with_mock(&mock, false).await;
+
+    let result = call(&client, "list_job_groups", json!({}))
+        .await
+        .expect("call_tool");
+
+    assert_eq!(text(&result), sample_job_groups());
+}
+
+#[tokio::test]
+async fn list_job_groups_name_filters_case_insensitively_in_both_modes() {
+    let mock = MockServer::start().await;
+    mock_job_groups(&mock, sample_job_groups()).await;
+    let client = server_with_mock(&mock, false).await;
+
+    let raw = call(&client, "list_job_groups", json!({"name": "SLE"}))
+        .await
+        .expect("call_tool");
+    let raw = text(&raw);
+    assert_eq!(raw.as_array().unwrap().len(), 2);
+    assert_eq!(raw[0]["template"], "big");
+
+    let summary = call(
+        &client,
+        "list_job_groups",
+        json!({"name": "micro", "summary": true}),
+    )
+    .await
+    .expect("call_tool");
+    assert_eq!(
+        text(&summary),
+        json!([{"id": 3, "name": "sle micro", "parent_id": null}])
+    );
+}
+
+#[tokio::test]
+async fn list_job_groups_upstream_error_keeps_its_kind() {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/job_groups"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .mount(&mock)
+        .await;
+    let client = server_with_mock(&mock, false).await;
+
+    let result = call(&client, "list_job_groups", json!({"summary": true}))
+        .await
+        .expect("an upstream failure is a tool-level error");
+
+    assert_eq!(result.is_error, Some(true));
+    let payload = text(&result);
+    assert_eq!(payload["error"]["kind"], "server_error");
+    assert_eq!(payload["error"]["status"], 500);
+}
+
+#[tokio::test]
+async fn oversized_result_is_a_response_too_large_error_and_the_session_survives() {
+    let mock = MockServer::start().await;
+    // Under ruoqa's 32 MiB body cap, over the 8 MiB result cap.
+    let template = "x".repeat(9 * 1024 * 1024);
+    mock_job_groups(
+        &mock,
+        json!([{"id": 1, "name": "big", "parent_id": null, "template": template}]),
+    )
+    .await;
+    let client = server_with_mock(&mock, false).await;
+
+    let result = call(&client, "list_job_groups", json!({}))
+        .await
+        .expect("an oversized result is a tool-level error, not a protocol error");
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(text(&result)["error"]["kind"], "response_too_large");
+
+    let again = call(&client, "list_job_groups", json!({"summary": true}))
+        .await
+        .expect("the session must still answer");
+    assert_ne!(again.is_error, Some(true));
+    assert_eq!(text(&again)[0]["id"], 1);
+}
+
 #[tokio::test]
 async fn add_job_comment_is_form_encoded_not_json() {
     let mock = MockServer::start().await;
