@@ -156,7 +156,7 @@ descriptions for brevity) — see [Environment variables](#environment-variables
 | `find_jobs_by_setting` | Find jobs whose setting `key` equals `list_value`. |
 | `get_job_details` | Get a single job with full test-module/step details. |
 | `get_job_status` | Get a lightweight job status (id, state, result, blocked_by_id). |
-| `list_job_groups` | List job groups. |
+| `list_job_groups` | List job groups. The raw rows are large (~20 MB on a big server); pass `summary=true` for `{id, name, parent_id}` rows and `name` to filter by substring. |
 | `get_job_group` | Get a single job group. |
 | `list_job_group_jobs` | List jobs belonging to a job group. |
 | `get_job_group_build_results` | Get aggregated build results for a job group. |
@@ -330,7 +330,8 @@ A tool call fails one of two ways:
   `{"error": {"kind", "status"?, "message", "body"?}}`. `body` is openQA's
   response body, truncated to 512 bytes. `kind` is one of: `unauthorized`,
   `forbidden`, `not_found`, `rate_limited`, `bad_request`, `server_error`,
-  `connection`, `timeout`, `response_too_large`, `invalid_response`,
+  `connection`, `timeout`, `response_too_large` (openQA's body, or the tool's
+  result, exceeded its size limit; see below), `invalid_response`,
   `unsupported_media` (a `get_job_log` artifact that isn't text, e.g. a
   video or image), `audit_unavailable` (the audit stream cannot persist and
   the configured [fail mode](docs/observability.md#fail-modes) refuses the
@@ -339,6 +340,11 @@ A tool call fails one of two ways:
   (bad `client.conf`, TLS setup failure, incomplete credentials, a
   cross-origin or outside-base-URL request). This is a JSON-RPC
   `internal_error`, which most MCP clients render opaquely.
+
+A tool result larger than 8 MiB (serialized) is replaced by a
+`response_too_large` error instead of being sent, because some clients drop
+the connection on a message over their 10 MiB stdio buffer. Narrow the
+request: `summary`, `limit`, or `tail_lines`/`grep` where the tool has them.
 
 `OPENQA_MCP_CALL_TIMEOUT` firing is reported as a `kind: "timeout"` tool
 error, not a protocol error: the tool call may have reached openQA, so an
