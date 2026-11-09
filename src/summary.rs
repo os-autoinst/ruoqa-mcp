@@ -61,6 +61,34 @@ pub fn summarize_jobs(jobs: &[Value]) -> Value {
     })
 }
 
+/// Narrow a raw `job_groups` array: keep rows whose `name` contains `name`
+/// (case-insensitively), then, if `summary`, reduce each to `{id, name,
+/// parent_id}` — the raw rows carry a `template` column that is ~95% of the
+/// payload.
+pub fn shape_job_groups(groups: &[Value], name: Option<&str>, summary: bool) -> Value {
+    let needle = name.map(str::to_lowercase);
+    let rows = groups.iter().filter(|group| {
+        needle.as_ref().is_none_or(|needle| {
+            group
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| n.to_lowercase().contains(needle))
+        })
+    });
+    if summary {
+        rows.map(|group| {
+            json!({
+                "id": group.get("id").cloned().unwrap_or(Value::Null),
+                "name": group.get("name").cloned().unwrap_or(Value::Null),
+                "parent_id": group.get("parent_id").cloned().unwrap_or(Value::Null),
+            })
+        })
+        .collect()
+    } else {
+        rows.cloned().collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +132,41 @@ mod tests {
         assert_eq!(summary["jobs"]["skipped"][0]["arch"], "s390x");
         assert_eq!(summary["jobs"]["running"][0]["id"], 5);
         assert!(summary["jobs"].get("none").is_none());
+    }
+
+    fn sample_groups() -> Vec<Value> {
+        serde_json::from_value(json!([
+            {"id": 1, "name": "SLE 15 SP6 Maintenance", "parent_id": 7, "template": "big"},
+            {"id": 2, "name": "Tumbleweed", "parent_id": null, "template": "big"},
+            {"id": 3, "name": "sle micro"}
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn job_groups_summary_keeps_only_id_name_parent_id() {
+        let rows = shape_job_groups(&sample_groups(), None, true);
+        assert_eq!(
+            rows,
+            json!([
+                {"id": 1, "name": "SLE 15 SP6 Maintenance", "parent_id": 7},
+                {"id": 2, "name": "Tumbleweed", "parent_id": null},
+                {"id": 3, "name": "sle micro", "parent_id": null},
+            ])
+        );
+    }
+
+    #[test]
+    fn job_groups_raw_mode_keeps_rows_unchanged() {
+        let groups = sample_groups();
+        assert_eq!(shape_job_groups(&groups, None, false), json!(groups));
+    }
+
+    #[test]
+    fn job_groups_name_filter_is_a_case_insensitive_substring() {
+        let rows = shape_job_groups(&sample_groups(), Some("SLE"), true);
+        let ids: Vec<_> = rows.as_array().unwrap().iter().map(|r| &r["id"]).collect();
+        assert_eq!(ids, [1, 3]);
     }
 
     #[test]

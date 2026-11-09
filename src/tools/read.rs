@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::error::{classify, tool_error};
 use crate::query::{Query, api};
 use crate::server::{OpenQaServer, ok, to_result};
-use crate::summary::summarize_jobs;
+use crate::summary::{shape_job_groups, summarize_jobs};
 use crate::tools::artifact;
 use crate::tools::{
     DIGEST_CONTEXT_LINES, DIGEST_MAX_HITS, DIGEST_TAIL_LINES, MAX_ARCHIVE_MEMBERS,
@@ -270,6 +270,19 @@ pub struct ServerOnly {
     /// Which configured openQA server to query. Call `list_servers` to
     /// discover valid values (including aliases like `osd`/`o3`).
     pub server: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListJobGroupsArgs {
+    /// Which configured openQA server to query. Call `list_servers` to
+    /// discover valid values (including aliases like `osd`/`o3`).
+    pub server: String,
+    /// Return only `{id, name, parent_id}` per group instead of the full rows.
+    #[serde(default)]
+    pub summary: bool,
+    /// Keep only groups whose name contains this text (case-insensitive).
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -582,17 +595,30 @@ data, save it to a temporary file and process it with jq, e.g. `jq '.jobs[] | se
         to_result(self.request_json(&ctx, client, Method::GET, &path).await)
     }
 
-    #[tool(description = "List job groups.", annotations(read_only_hint = true))]
+    #[tool(
+        description = "List job groups. WARNING: the raw rows include a large `template` column \
+(~20 MB for all groups on a big server) and the result is refused above 8 MiB. Pass summary=true \
+for compact {id, name, parent_id} rows, and `name` to filter by substring. Use get_job_group for \
+a group's full row.",
+        annotations(read_only_hint = true)
+    )]
     async fn list_job_groups(
         &self,
-        Parameters(ServerOnly { server }): Parameters<ServerOnly>,
+        Parameters(args): Parameters<ListJobGroupsArgs>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
-        let client = self.resolve_server(&server)?;
-        to_result(
-            self.request_json(&ctx, client, Method::GET, &api("job_groups"))
-                .await,
-        )
+        let client = self.resolve_server(&args.server)?;
+        let body = self
+            .request_json(&ctx, client, Method::GET, &api("job_groups"))
+            .await;
+        match body {
+            Ok(Value::Array(groups)) => to_result(Ok(shape_job_groups(
+                &groups,
+                args.name.as_deref(),
+                args.summary,
+            ))),
+            other => to_result(other),
+        }
     }
 
     #[tool(
