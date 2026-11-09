@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1](https://github.com/os-autoinst/ruoqa-mcp/compare/v0.7.0...v0.7.1) - 2026-11-09
+
+### Added
+
+- *(tools)* add summary and name filter to list_job_groups
+
+### Fixed
+
+- *(deps)* update rmcp to 3.9.0 to clear RUSTSEC-2026-0462
+- *(server)* refuse tool results over 8 MiB instead of dropping the connection
+
+### Other
+
+- describe list_job_groups summary/name and the result size cap
+
 ## [0.7.0](https://github.com/os-autoinst/ruoqa-mcp/compare/v0.6.2...v0.7.0) - 2026-10-27
 
 ### Added
