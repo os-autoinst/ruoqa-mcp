@@ -1,22 +1,29 @@
 [licenses]
 allow = [
-    "Apache-2.0",
-    "MIT",
-    "ISC",
-    "BSD-3-Clause",
-    "Unicode-3.0",
-    "MIT-0",
-    "Zlib",
-    "CC0-1.0",
-    "CDLA-Permissive-2.0",
+  "Apache-2.0",
+  "MIT",
+  "ISC",
+  "BSD-3-Clause",
+  "Unicode-3.0",
+  "MIT-0",
+  "Zlib",
+  "CC0-1.0",
+  "CDLA-Permissive-2.0",
 ]
 # ruoqa-mcp itself is GPL-3.0-or-later, and so is its `ruoqa` dependency; the
 # allow-list above stays permissive-only so a future dependency dragging in a
 # GPL-incompatible term (an `OpenSSL` or CDDL clause) fails CI rather than
 # quietly shipping.
 exceptions = [
-    { allow = ["GPL-3.0-or-later"], crate = "ruoqa-mcp" },
-    { allow = ["GPL-3.0-or-later"], crate = "ruoqa" },
+  { allow = ["GPL-3.0-or-later"], crate = "ruoqa-mcp" },
+  { allow = ["GPL-3.0-or-later"], crate = "ruoqa" },
+]
+
+[advisories]
+# "Unmaintained" notice, not a vulnerability. chrono is also pulled in by
+# rmcp and schemars, so it can't be dropped until they migrate.
+ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained notice; transitive via rmcp/schemars, no safe upgrade" },
 ]
 
 [bans]
@@ -26,8 +33,8 @@ exceptions = [
 # during the ecosystem's migration). None are fixable via `cargo update`
 # alone; skip the older side so genuinely new duplicates still get flagged.
 skip = [
-    { crate = "core-foundation@0.9.4", reason = "system-configuration 0.7 lags rustls-platform-verifier's core-foundation 0.10" },
-    { crate = "getrandom@0.2.17", reason = "rust-ini's ordered-multimap/dlv-list lag the rest of the tree" },
-    { crate = "hashbrown@0.14.5", reason = "rust-ini's ordered-multimap lags indexmap's hashbrown 0.17" },
-    { crate = "syn@2.0.119", reason = "several proc-macro crates haven't migrated to syn 3 yet" },
+  { crate = "core-foundation@0.9.4", reason = "system-configuration 0.7 lags rustls-platform-verifier's core-foundation 0.10" },
+  { crate = "getrandom@0.2.17", reason = "rust-ini's ordered-multimap/dlv-list lag the rest of the tree" },
+  { crate = "hashbrown@0.14.5", reason = "rust-ini's ordered-multimap lags indexmap's hashbrown 0.17" },
+  { crate = "syn@2.0.119", reason = "several proc-macro crates haven't migrated to syn 3 yet" },
 ]
