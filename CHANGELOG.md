@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2](https://github.com/os-autoinst/ruoqa-mcp/compare/v0.7.1...v0.7.2) - 2026-11-23
+
+### Added
+
+- *(get_job_log)* mark grep line numbers as relative to the tail
+- let clone_job run a GitHub PR or branch's test code
+- add clone_job to copy a job with changed settings
+
+### Fixed
+
+- bound the size of allow-listed argument values in the audit stream
+- keep the audit outage accounting when the gap record cannot be stored
+- restore the live audit file when reopening after rotation fails
+- gate OTLP-only audit on the shared logs pipeline's health
+- *(get_job_log_errors)* fall back to the tail when custom markers match nothing
+- *(get_job_log_errors)* look for a stack trace only inside the die's own log entry
+- *(get_job_log)* decode tails that start mid-character and keep short first lines
+- *(get_job_log)* saturate tail and grep arithmetic and stop repeating context lines
+- *(get_job_log)* reject out-of-range tail_lines, context_lines and max_matches
+- keep get_step_needles replies under the result cap
+- apply the result size cap to every tool reply, not just ok()
+- *(otel)* report a panicked export task and count records it held
+- *(otel)* bound Retry-After and let shutdown interrupt export backoff
+- *(otel)* anchor the batch deadline to the first queued record
+- *(otel)* keep endpoint credentials out of InvalidUrl errors
+- *(otel)* reject OTEL_* sizes and durations that break the exporter
+- skip ~/.env lines that std::env::set_var cannot take
+- omit the LogRecord body when it is empty
+- keep zero-valued attributes' AnyValue arm in OTLP
+- stop decode_hex panicking on multi-byte traceparent input
+- open an audit gap when the OTLP-only audit queue drops a record
+- fold unregistered tool names into one metric series
+- say which jobs clone_job's dry_run hides wholesale
+- hide secret values in clone_job's dry_run reply
+- refuse clone_job when clones reference missing assets
+- *(deps)* update url to 2.5.9 for RUSTSEC-2026-0592
+
+### Other
+
+- make the audit argument-capture tests exercise what they claim
+- describe argument size limits and audit gap recovery
+- document get_job_log limits, line_base and the markers fallback
+- *(deps)* bump the cargo-minor-patch group with 3 updates
+- describe the get_step_needles size budget and candidate cap
+- pin the Dockerfile base images by digest
+- allow-list the Docker build context
+- git-ignore the local secrets the README tells users to create
+- document OTEL_* bounds and skipped ~/.env lines
+- cover a multi-byte traceparent end to end
+- report whether the OTLP queue accepted an enqueued record
+- unknown tool names share one tool=unknown metric series
+- note unknown tools fold into tool=unknown, fix error.kind name
+- list missing_assets among the tool error kinds
+- *(deny)* ignore RUSTSEC-2026-0543 chrono unmaintained notice
+
 ## [0.7.1](https://github.com/os-autoinst/ruoqa-mcp/compare/v0.7.0...v0.7.1) - 2026-11-09
 
 ### Added
