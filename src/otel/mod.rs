@@ -138,10 +138,13 @@ impl Telemetry {
         );
     }
 
-    /// A send handle onto the logs pipeline, for the audit stream to
-    /// piggyback on. `None` when the logs signal is not configured.
-    pub(crate) fn log_producer(&self) -> Option<pipeline::Producer> {
-        self.logs.as_ref().map(pipeline::Exporter::producer)
+    /// A send handle onto the logs pipeline plus its delivery health, for
+    /// the audit stream to piggyback on. `None` when the logs signal is not
+    /// configured.
+    pub(crate) fn log_producer(&self) -> Option<(pipeline::Producer, Arc<pipeline::Health>)> {
+        self.logs
+            .as_ref()
+            .map(|exporter| (exporter.producer(), exporter.health()))
     }
 
     /// A send handle onto the audit stream's own export task, plus its

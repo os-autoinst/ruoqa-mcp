@@ -394,6 +394,43 @@ async fn path_none_collector_failure_engages_gate_then_recovers() {
 
     telemetry.shutdown().await;
 
+    // A `log_producer()` handle watches the shared logs pipeline's health,
+    // so it fails closed too rather than reporting an unwatched pipeline
+    // as delivering.
+    let telemetry = Telemetry::init()
+        .await
+        .expect("probe succeeds")
+        .expect("OTEL_EXPORTER_OTLP_ENDPOINT is set");
+    let log_producer = telemetry
+        .log_producer()
+        .expect("the logs signal is configured");
+    let auditor = Arc::new(
+        Auditor::open(&cfg)
+            .unwrap()
+            .with_otlp(log_producer)
+            .with_fail_mode(fail_mode),
+    );
+    let client = run_server(&mock, Arc::clone(&auditor)).await;
+
+    let baseline = call(&client, "get_job", json!({"job_id": 7})).await;
+    assert_ne!(baseline.is_error, Some(true));
+
+    collector.reset().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&collector)
+        .await;
+
+    call(&client, "get_job", json!({"job_id": 7})).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    call(&client, "get_job", json!({"job_id": 7})).await;
+
+    let refused = call(&client, "get_job", json!({"job_id": 7})).await;
+    assert_eq!(refused.is_error, Some(true));
+    assert_eq!(error_kind(&refused).as_deref(), Some("audit_unavailable"));
+
+    telemetry.shutdown().await;
+
     unsafe {
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
         std::env::remove_var("OTEL_TRACES_EXPORTER");

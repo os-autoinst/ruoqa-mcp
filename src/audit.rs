@@ -1400,6 +1400,24 @@ mod tests {
     }
 
     #[test]
+    fn otlp_only_gate_reads_producer_health() {
+        let cfg = AuditConfig::parse("path = \"none\"\n").unwrap();
+        let health = crate::otel::pipeline::Health::for_test();
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let producer = LogProducer::for_test_with_health(tx, std::sync::Arc::clone(&health));
+        let auditor = Auditor::open(&cfg).unwrap().with_otlp(producer);
+
+        auditor.session_open("s0", Transport::Stdio);
+        assert!(!auditor.failing.load(Ordering::Relaxed));
+
+        health.set_failing();
+        auditor.session_open("s1", Transport::Stdio);
+
+        assert!(auditor.failing.load(Ordering::Relaxed));
+        assert_eq!(gap_count(&auditor), Some(1));
+    }
+
+    #[test]
     fn otlp_only_closed_queue_opens_a_gap() {
         let cfg = AuditConfig::parse("path = \"none\"\n").unwrap();
         let (producer, rx) = stub_producer();
