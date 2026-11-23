@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
 use crate::LogProducer;
+use crate::error::truncate;
 use crate::otel::{logs, proto, traces};
 
 /// Which transport served a session; carried on every record. Also the CLI's
@@ -195,8 +196,17 @@ const ARGS_ALLOW: &[&str] = &[
 /// recorded verbatim.
 const ARGS_MAX_ARRAY: usize = 20;
 
+/// Allow-listed strings beyond this many bytes keep only their first
+/// `ARGS_MAX_STRING` bytes (and their length).
+const ARGS_MAX_STRING: usize = 1024;
+
+/// Any other allow-listed value whose JSON exceeds this many bytes is
+/// summarized instead of recorded verbatim.
+const ARGS_MAX_VALUE: usize = 4096;
+
 /// Apply the argument capture policy to a tool call's arguments: allow-listed
-/// scalars and short arrays verbatim, everything else as `{"_len": n}`.
+/// scalars, short strings and small arrays verbatim, everything else as
+/// `{"_len": n}` (long strings also keep a `_head`).
 /// `None` for no arguments at all.
 #[must_use]
 pub fn capture_args(args: Option<&serde_json::Map<String, Value>>) -> Option<Value> {
@@ -218,9 +228,17 @@ pub fn capture_args(args: Option<&serde_json::Map<String, Value>>) -> Option<Val
 
 fn capture_allowed(value: &Value) -> Value {
     match value {
+        Value::String(s) if s.len() > ARGS_MAX_STRING => {
+            json!({ "_len": s.len(), "_head": truncate(s, ARGS_MAX_STRING) })
+        }
         Value::Array(items) if items.len() > ARGS_MAX_ARRAY => summarize(value),
+        Value::Array(_) | Value::Object(_) if json_len(value) > ARGS_MAX_VALUE => summarize(value),
         _ => value.clone(),
     }
+}
+
+fn json_len(value: &Value) -> usize {
+    serde_json::to_string(value).map_or(usize::MAX, |s| s.len())
 }
 
 fn summarize(value: &Value) -> Value {
@@ -1037,11 +1055,42 @@ mod tests {
     }
 
     #[test]
-    fn capture_args_text_uncapped() {
-        let big_text = "x".repeat(1_000_000);
-        let args = json!({"text": big_text});
+    fn capture_args_short_text_verbatim() {
+        let text = "x".repeat(ARGS_MAX_STRING);
+        let args = json!({"text": text, "title": "hi"});
         let captured = capture_args(args.as_object()).unwrap();
-        assert_eq!(captured["text"].as_str().unwrap().len(), 1_000_000);
+        assert_eq!(captured["text"], json!(text));
+        assert_eq!(captured["title"], "hi");
+    }
+
+    #[test]
+    fn capture_args_long_text_keeps_a_head() {
+        let args = json!({"text": "x".repeat(1_000_000)});
+        let captured = capture_args(args.as_object()).unwrap();
+        assert_eq!(captured["text"]["_len"], 1_000_000);
+        assert_eq!(
+            captured["text"]["_head"],
+            json!("x".repeat(ARGS_MAX_STRING))
+        );
+    }
+
+    #[test]
+    fn capture_args_multibyte_head_is_char_safe() {
+        let args = json!({"text": "é".repeat(600)});
+        let captured = capture_args(args.as_object()).unwrap();
+        assert_eq!(captured["text"]["_len"], 1200);
+        let head = captured["text"]["_head"].as_str().unwrap();
+        assert_eq!(head, "é".repeat(512));
+        assert!(head.len() <= ARGS_MAX_STRING);
+    }
+
+    #[test]
+    fn capture_args_oversized_allowlisted_object_is_summarized() {
+        let big = "y".repeat(5 * 1024);
+        let args = json!({"text": {"a": big}, "job_ids": [big]});
+        let captured = capture_args(args.as_object()).unwrap();
+        assert_eq!(captured["text"], json!({"_len": 1}));
+        assert_eq!(captured["job_ids"], json!({"_len": 1}));
     }
 
     #[test]
