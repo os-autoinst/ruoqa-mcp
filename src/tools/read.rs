@@ -1091,11 +1091,12 @@ refused with an `unsupported_media` error.",
                         Err(bail) => return bail,
                     };
                     let len = tail.bytes.len() as u64;
-                    let Ok(text) = String::from_utf8(tail.bytes) else {
+                    let from_start = tail.start == 0;
+                    let Some(text) = artifact::decode_tail(&tail.bytes, from_start) else {
                         // `len` is the tail window, not the file: report the probe's total.
                         return artifact::unsupported_media(&probe.url, probe.size.unwrap_or(len));
                     };
-                    let text = artifact::drop_partial_first_line(&text).to_string();
+                    let text = artifact::drop_partial_first_line(&text, from_start).to_string();
                     (
                         text,
                         len,

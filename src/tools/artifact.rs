@@ -249,6 +249,8 @@ pub(crate) fn unsupported_media(url: &reqwest::Url, size: u64) -> Bail {
 /// Result of a tail-range fetch.
 pub(crate) struct TailFetch {
     pub(crate) bytes: Vec<u8>,
+    /// Byte offset `bytes` begins at; 0 means the whole file.
+    pub(crate) start: u64,
     /// True if `ETag`/`Last-Modified` moved between the probe and this read
     /// (even after one retry) — a job's log grew while we were reading it.
     pub(crate) changed_during_read: bool,
@@ -303,6 +305,7 @@ pub(crate) async fn fetch_tail(
         let bytes = read_capped(&mut resp, ceiling).await?;
         return Ok(TailFetch {
             bytes,
+            start,
             changed_during_read: changed,
         });
     }
@@ -687,10 +690,40 @@ fn last_n_lines(text: &str, n: usize) -> String {
 }
 
 /// Drops everything up to and including the first `\n`, for text read from
-/// a byte-ranged tail (which may start mid-line). A window with no newline
-/// at all is a single partial line with nothing else to show.
-pub(crate) fn drop_partial_first_line(text: &str) -> &str {
-    text.find('\n').map_or("", |i| &text[i + 1..])
+/// a byte-ranged tail (which may start mid-line). Kept whole when the window
+/// starts at byte 0, or when it holds no newline besides a trailing one: one
+/// partial line beats nothing.
+pub(crate) fn drop_partial_first_line(text: &str, from_start: bool) -> &str {
+    if from_start {
+        return text;
+    }
+    match text.find('\n') {
+        Some(i) if i + 1 < text.len() => &text[i + 1..],
+        _ => text,
+    }
+}
+
+/// Strictly decodes a byte-ranged tail. A window that doesn't begin at byte 0
+/// may start inside a multi-byte character, and a log still being written may
+/// end inside one; neither is binary content.
+pub(crate) fn decode_tail(bytes: &[u8], from_start: bool) -> Option<String> {
+    let skip = if from_start {
+        0
+    } else {
+        bytes
+            .iter()
+            .take(3)
+            .take_while(|&&b| b & 0xC0 == 0x80)
+            .count()
+    };
+    let bytes = &bytes[skip..];
+    match std::str::from_utf8(bytes) {
+        Ok(s) => Some(s.to_string()),
+        Err(e) if e.error_len().is_none() => std::str::from_utf8(&bytes[..e.valid_up_to()])
+            .ok()
+            .map(str::to_string),
+        Err(_) => None,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1426,8 +1459,46 @@ mod tests {
 
     #[test]
     fn drop_partial_first_line_drops_up_to_first_newline() {
-        assert_eq!(drop_partial_first_line("rtial\nb\nc"), "b\nc");
-        assert_eq!(drop_partial_first_line("no newline here"), "");
+        assert_eq!(drop_partial_first_line("rtial\nb\nc", false), "b\nc");
+    }
+
+    #[test]
+    fn drop_partial_first_line_keeps_text_at_file_start() {
+        assert_eq!(drop_partial_first_line("a\nb\nc", true), "a\nb\nc");
+    }
+
+    #[test]
+    fn drop_partial_first_line_keeps_a_lone_partial_line() {
+        assert_eq!(
+            drop_partial_first_line("tail of a long line", false),
+            "tail of a long line"
+        );
+        assert_eq!(
+            drop_partial_first_line("tail of a long line\n", false),
+            "tail of a long line\n"
+        );
+    }
+
+    #[test]
+    fn decode_tail_skips_leading_continuation_bytes() {
+        let bytes = &"é\nok".as_bytes()[1..];
+        assert_eq!(decode_tail(bytes, false).as_deref(), Some("\nok"));
+        assert_eq!(decode_tail(bytes, true), None);
+    }
+
+    #[test]
+    fn decode_tail_accepts_a_truncated_last_char() {
+        let bytes = &"ok\né".as_bytes()[..4];
+        assert_eq!(decode_tail(bytes, false).as_deref(), Some("ok\n"));
+    }
+
+    #[test]
+    fn decode_tail_rejects_binary() {
+        assert_eq!(decode_tail(b"ab\xff\xfecd", false), None);
+        assert_eq!(
+            decode_tail(&[0x89, b'P', b'N', b'G', 0xff, 0x00], false),
+            None
+        );
     }
 
     #[test]
