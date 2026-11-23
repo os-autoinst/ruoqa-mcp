@@ -336,7 +336,10 @@ credentials, so it is unavailable to a read-scope HTTP token even with
   `warnings`: `redacted` lists settings that still hold `[redacted]` (the
   credential cannot read secrets; they clone as `[redacted]`), and
   `missing_assets` lists assets the clones still reference that no longer exist
-  and no cloned job publishes. Warnings never block the clone.
+  and no cloned job publishes. A clone that still references a missing asset is
+  refused (`missing_assets` tool error, no job created), as `openqa-clone-job`
+  does, unless `ignore_missing_assets` is set; `dry_run` only reports it. The
+  `redacted` warning never blocks the clone.
 - `github_ref` (`https://github.com/<owner>/<repo>/pull/<n>` or
   `.../tree/<branch>`) does what `openqa-clone-custom-git-refspec` does: it
   prepends `_GROUP=0`, `TEST+=@<repo>#<branch>`, `BUILD=<repo>#<pr or branch>`,

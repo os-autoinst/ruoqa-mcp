@@ -127,6 +127,10 @@ pub struct CloneJob {
     /// Return the settings the clones would be created with, create nothing.
     #[serde(default)]
     pub dry_run: Option<bool>,
+    /// Create the clones even when they reference assets that no longer
+    /// exist (default false: refused, as `openqa-clone-job` does).
+    #[serde(default)]
+    pub ignore_missing_assets: Option<bool>,
     /// A GitHub pull request (`https://github.com/<owner>/<repo>/pull/<n>`)
     /// or branch (`https://github.com/<owner>/<repo>/tree/<branch>`) whose
     /// test code the clones should run. Derives `_GROUP=0`, `TEST`, `BUILD`,
@@ -519,8 +523,9 @@ clone_children chained children (see max_depth); at most 50 jobs. Pass `_GROUP=0
 settings so clones stay off production dashboards, and skip_chained_deps to avoid re-running \
 install jobs. Use dry_run first to see the exact settings. github_ref runs a GitHub PR or \
 branch's test code. Differs from duplicate_job and restart_jobs, which take no overrides. \
-Needs operator credentials; secrets the credential cannot read stay `[redacted]` and are \
-listed under warnings.",
+Refused when a clone still references a missing asset, unless ignore_missing_assets. Needs \
+operator credentials; secrets the credential cannot read stay `[redacted]` and are listed under \
+warnings.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -617,8 +622,25 @@ listed under warnings.",
             }
         };
 
+        let warnings = clone::warnings(&plan, &cache);
+        let dry_run = args.dry_run.unwrap_or(false);
+        if !dry_run
+            && !args.ignore_missing_assets.unwrap_or(false)
+            && let Some(missing) = warnings.as_ref().and_then(|w| w.get("missing_assets"))
+        {
+            return tool_error(
+                "missing_assets",
+                None,
+                format!(
+                    "the clones reference assets that no longer exist ({missing}); \
+                     override the setting, or pass ignore_missing_assets to clone anyway"
+                ),
+                None,
+            );
+        }
+
         let mut reply = Map::new();
-        if args.dry_run.unwrap_or(false) {
+        if dry_run {
             reply.insert("dry_run".into(), json!(true));
             reply.insert("jobs".into(), json!(plan.settings));
         } else {
@@ -649,7 +671,7 @@ listed under warnings.",
             reply.insert("ids".into(), ids.map_or(Value::Null, |m| json!(m)));
             reply.insert("urls".into(), Value::Object(urls));
         }
-        if let Some(warnings) = clone::warnings(&plan, &cache) {
+        if let Some(warnings) = warnings {
             reply.insert("warnings".into(), warnings);
         }
         if let Some(derived) = derived {
