@@ -1,2 +1,6 @@
 /target
 /plans/
+/client.conf
+/ca.pem
+/audit.toml
+/.env
