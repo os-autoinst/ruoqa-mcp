@@ -1274,6 +1274,66 @@ async fn get_job_log_tail_uses_absolute_range_and_returns_the_tail() {
 }
 
 #[tokio::test]
+async fn get_job_log_tail_starting_mid_character_succeeds() {
+    let mock = MockServer::start().await;
+    // 9001 bytes; the 8 KiB tail window starts at byte 809, the second byte of an `é`.
+    let body = format!("x{}", "é\n".repeat(3000)).into_bytes();
+    assert_eq!(body.len(), 9001);
+    let file = std::sync::Arc::new(RangedFile::fixed(body, "etag-1"));
+    let responder = {
+        let file = file.clone();
+        move |req: &Request| file.respond(req)
+    };
+    Mock::given(method("GET"))
+        .and(path("/tests/7/file/autoinst-log.txt"))
+        .respond_with(responder)
+        .mount(&mock)
+        .await;
+    let client = server_with_mock(&mock, true).await;
+
+    let result = call(
+        &client,
+        "get_job_log",
+        json!({"job_id": 7, "filename": "autoinst-log.txt", "tail_lines": 5}),
+    )
+    .await
+    .expect("call_tool");
+
+    assert_ne!(result.is_error, Some(true), "{:?}", text(&result));
+    assert_eq!(text(&result)["content"], ["é"; 5].join("\n"));
+}
+
+#[tokio::test]
+async fn get_job_log_tail_of_a_small_file_keeps_its_first_line() {
+    let mock = MockServer::start().await;
+    let body = numbered_lines(300).into_bytes();
+    assert_eq!(body.len(), 2700);
+    let file = std::sync::Arc::new(RangedFile::fixed(body, "etag-1"));
+    let responder = {
+        let file = file.clone();
+        move |req: &Request| file.respond(req)
+    };
+    Mock::given(method("GET"))
+        .and(path("/tests/7/file/autoinst-log.txt"))
+        .respond_with(responder)
+        .mount(&mock)
+        .await;
+    let client = server_with_mock(&mock, true).await;
+
+    let result = call(
+        &client,
+        "get_job_log",
+        json!({"job_id": 7, "filename": "autoinst-log.txt", "tail_lines": 1000}),
+    )
+    .await
+    .expect("call_tool");
+
+    let content = text(&result)["content"].as_str().unwrap().to_string();
+    assert!(content.starts_with("line0000"), "{content:.40}");
+    assert!(content.ends_with("line0299"));
+}
+
+#[tokio::test]
 async fn get_job_log_server_ignoring_range_is_still_correct() {
     let mock = MockServer::start().await;
     let body = numbered_lines(10);
