@@ -64,7 +64,9 @@ pub(crate) fn encode_record(
     proto::write_fixed64(&mut buf, 1, ts_unix_nanos);
     proto::write_uint32(&mut buf, 2, severity as u32);
     proto::write_string(&mut buf, 3, severity.text());
-    proto::write_any_value(&mut buf, 5, &Value::Str(body));
+    if !body.is_empty() {
+        proto::write_any_value(&mut buf, 5, &Value::Str(body));
+    }
     proto::write_attributes(&mut buf, 6, attrs);
     proto::write_fixed64(&mut buf, 11, ts_unix_nanos);
     if let Some(span) = span {
@@ -305,6 +307,19 @@ mod tests {
 
             assert_eq!(bytes, expected, "{severity:?}");
         }
+    }
+
+    #[test]
+    fn encode_record_omits_the_body_when_empty() {
+        let bytes = encode_record(42, Severity::Info, "", &[], None);
+
+        let mut expected = Vec::new();
+        proto::write_fixed64(&mut expected, 1, 42);
+        proto::write_uint32(&mut expected, 2, Severity::Info as u32);
+        proto::write_string(&mut expected, 3, "INFO");
+        proto::write_fixed64(&mut expected, 11, 42);
+
+        assert_eq!(bytes, expected);
     }
 
     #[test]
