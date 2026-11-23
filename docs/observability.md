@@ -132,9 +132,10 @@ Three independent OTLP/HTTP signals, each off unless its endpoint resolves:
   made. Attributes include `tool`, `scope`, `outcome`, `error.kind`, and
   `server`.
 - **Metrics** carry two cumulative instruments: `ruoqa.tool.calls` (a
-  counter, attributed by `tool`/`server`/`outcome`/`error_kind`) and
+  counter, attributed by `tool`/`server`/`outcome`/`error.kind`) and
   `ruoqa.tool.duration` (a millisecond histogram, attributed by
-  `tool`/`server`).
+  `tool`/`server`). Calls to an unknown tool name are counted under
+  `tool=unknown`; spans and audit records keep the name as sent.
 
 ### `OTEL_*` variables
 
