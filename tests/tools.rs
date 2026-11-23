@@ -2456,7 +2456,10 @@ fn form_of(request: &Request) -> std::collections::BTreeMap<String, String> {
         .collect()
 }
 
-async fn clone_server(mock: &MockServer) -> RunningService<RoleClient, ()> {
+async fn clone_server(
+    mock: &MockServer,
+    github: Option<ruoqa_mcp::github::GitHub>,
+) -> RunningService<RoleClient, ()> {
     let client = ruoqa::ClientBuilder::new()
         .server(mock.uri())
         .config_paths(vec![])
@@ -2464,7 +2467,10 @@ async fn clone_server(mock: &MockServer) -> RunningService<RoleClient, ()> {
         .expect("build client");
     let mut clients = std::collections::HashMap::new();
     clients.insert(TEST_SERVER.to_string(), client);
-    let server = OpenQaServer::new(ServerRegistry::from_map(clients), false);
+    let mut server = OpenQaServer::new(ServerRegistry::from_map(clients), false);
+    if let Some(github) = github {
+        server = server.with_github(github);
+    }
     let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
     tokio::spawn(async move {
         if let Ok(running) = server.serve(server_transport).await {
@@ -2484,7 +2490,7 @@ async fn clone_job_single_job_posts_scoped_settings_and_returns_urls() {
     )
     .await;
     mount_clone_create(&mock, json!({"7": 107})).await;
-    let client = clone_server(&mock).await;
+    let client = clone_server(&mock, None).await;
 
     let result = call(
         &client,
@@ -2531,7 +2537,7 @@ async fn clone_job_parallel_parent_is_cloned_and_linked() {
     mount_clone_job(&mock, 42, json!({"parents": {"Parallel": [41]}})).await;
     mount_clone_job(&mock, 41, json!({"settings": {"TEST": "parent"}})).await;
     mount_clone_create(&mock, json!({"41": 141, "42": 142})).await;
-    let client = clone_server(&mock).await;
+    let client = clone_server(&mock, None).await;
 
     call(&client, "clone_job", json!({"job_id": 42}))
         .await
@@ -2548,7 +2554,7 @@ async fn clone_job_skip_chained_deps_never_fetches_the_chained_parent() {
     let mock = MockServer::start().await;
     mount_clone_job(&mock, 42, json!({"parents": {"Chained": [41]}})).await;
     mount_clone_create(&mock, json!({"42": 142})).await;
-    let client = clone_server(&mock).await;
+    let client = clone_server(&mock, None).await;
 
     call(
         &client,
@@ -2570,7 +2576,7 @@ async fn clone_job_dry_run_posts_nothing_and_returns_the_settings() {
     let mock = MockServer::start().await;
     mount_clone_job(&mock, 7, json!({})).await;
     mount_clone_create(&mock, json!({"7": 107})).await;
-    let client = clone_server(&mock).await;
+    let client = clone_server(&mock, None).await;
 
     let result = call(
         &client,
@@ -2598,7 +2604,7 @@ async fn clone_job_redacted_secret_warns_and_still_clones() {
     )
     .await;
     mount_clone_create(&mock, json!({"7": 107})).await;
-    let client = clone_server(&mock).await;
+    let client = clone_server(&mock, None).await;
 
     let result = call(
         &client,
@@ -2628,7 +2634,7 @@ async fn clone_job_reports_missing_assets_unless_overridden() {
     )
     .await;
     mount_clone_create(&mock, json!({"7": 107})).await;
-    let client = clone_server(&mock).await;
+    let client = clone_server(&mock, None).await;
 
     let result = call(&client, "clone_job", json!({"job_id": 7}))
         .await
@@ -2651,7 +2657,7 @@ async fn clone_job_reports_missing_assets_unless_overridden() {
 #[tokio::test]
 async fn clone_job_rejects_bad_settings_without_any_request() {
     let mock = MockServer::start().await;
-    let client = clone_server(&mock).await;
+    let client = clone_server(&mock, None).await;
 
     let err = call(
         &client,
@@ -2685,7 +2691,7 @@ async fn clone_job_openqa_rejection_becomes_a_bad_request_tool_error() {
         .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error": "no such machine"})))
         .mount(&mock)
         .await;
-    let client = clone_server(&mock).await;
+    let client = clone_server(&mock, None).await;
 
     let result = call(&client, "clone_job", json!({"job_id": 7}))
         .await
@@ -2705,7 +2711,7 @@ async fn clone_job_refuses_a_cluster_over_the_cap_before_posting() {
         mount_clone_job(&mock, id, json!({"children": {"Parallel": [id + 1]}})).await;
     }
     mount_clone_create(&mock, json!({})).await;
-    let client = clone_server(&mock).await;
+    let client = clone_server(&mock, None).await;
 
     let err = call(&client, "clone_job", json!({"job_id": 1, "max_depth": 0}))
         .await
@@ -2715,4 +2721,334 @@ async fn clone_job_refuses_a_cluster_over_the_cap_before_posting() {
     let requests = mock.received_requests().await.expect("recorded requests");
     assert!(requests.iter().all(|r| r.method.as_str() != "POST"));
     assert!(requests.iter().all(|r| r.url.path() != "/api/v1/jobs/51"));
+}
+
+async fn mount_vars(mock: &MockServer, id: i64) {
+    Mock::given(method("GET"))
+        .and(path(format!("/tests/{id}/file/vars.json")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "TEST": "t",
+            "CASEDIR": "/my/case/dir",
+            "PRODUCTDIR": "/my/case/dir/product"
+        })))
+        .mount(mock)
+        .await;
+}
+
+async fn mount_pull(github: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/repos/user/repo/pulls/9128"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "head": {"ref": "my/branch", "repo": {"full_name": "user/repo"}}
+        })))
+        .mount(github)
+        .await;
+}
+
+const PR_URL: &str = "https://github.com/user/repo/pull/9128";
+
+#[tokio::test]
+async fn clone_job_github_pr_derives_settings_and_skips_chained_parents() {
+    let openqa = MockServer::start().await;
+    let github = MockServer::start().await;
+    mount_pull(&github).await;
+    mount_vars(&openqa, 42).await;
+    mount_clone_job(
+        &openqa,
+        42,
+        json!({
+            "group_id": 5,
+            "settings": {"TEST": "main"},
+            "parents": {"Parallel": [41], "Chained": [40]}
+        }),
+    )
+    .await;
+    mount_clone_job(&openqa, 41, json!({"settings": {"TEST": "parent"}})).await;
+    mount_clone_create(&openqa, json!({"41": 141, "42": 142})).await;
+    let client = clone_server(
+        &openqa,
+        Some(ruoqa_mcp::github::GitHub::new(&github.uri(), None)),
+    )
+    .await;
+
+    let result = call(
+        &client,
+        "clone_job",
+        json!({"job_id": 42, "github_ref": PR_URL}),
+    )
+    .await
+    .expect("call_tool");
+
+    let requests = openqa.received_requests().await.expect("recorded requests");
+    assert!(requests.iter().all(|r| r.url.path() != "/api/v1/jobs/40"));
+    let form = form_of(&posts(&openqa).await[0]);
+    assert_eq!(
+        form["CASEDIR:42"],
+        "https://github.com/user/repo.git#my/branch"
+    );
+    assert_eq!(form["BUILD:42"], "user/repo#9128");
+    assert_eq!(form["TEST:42"], "main@user/repo#my/branch");
+    assert_eq!(form["PRODUCTDIR:42"], "repo/product");
+    assert_eq!(form["_GROUP:42"], "0");
+    assert_eq!(form["_GROUP:41"], "0");
+    assert!(!form.contains_key("_GROUP_ID:42"));
+    assert_eq!(
+        text(&result)["derived_settings"],
+        json!([
+            "_GROUP=0",
+            "TEST+=@user/repo#my/branch",
+            "BUILD=user/repo#9128",
+            "CASEDIR=https://github.com/user/repo.git#my/branch",
+            "PRODUCTDIR=repo/product"
+        ])
+    );
+}
+
+#[tokio::test]
+async fn clone_job_github_branch_url_makes_no_github_request() {
+    let openqa = MockServer::start().await;
+    let github = MockServer::start().await;
+    mount_vars(&openqa, 7).await;
+    mount_clone_job(&openqa, 7, json!({})).await;
+    mount_clone_create(&openqa, json!({"7": 107})).await;
+    let client = clone_server(
+        &openqa,
+        Some(ruoqa_mcp::github::GitHub::new(&github.uri(), None)),
+    )
+    .await;
+
+    call(
+        &client,
+        "clone_job",
+        json!({"job_id": 7, "github_ref": "https://github.com/user/repo/tree/my/branch"}),
+    )
+    .await
+    .expect("call_tool");
+
+    assert!(
+        github
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .is_empty()
+    );
+    let form = form_of(&posts(&openqa).await[0]);
+    assert_eq!(form["BUILD:7"], "user/repo#my/branch");
+    assert_eq!(
+        form["CASEDIR:7"],
+        "https://github.com/user/repo.git#my/branch"
+    );
+}
+
+#[tokio::test]
+async fn clone_job_github_token_is_sent_as_bearer_only_when_set() {
+    for token in [Some("tok"), None] {
+        let openqa = MockServer::start().await;
+        let github = MockServer::start().await;
+        mount_pull(&github).await;
+        mount_vars(&openqa, 7).await;
+        mount_clone_job(&openqa, 7, json!({})).await;
+        let client = clone_server(
+            &openqa,
+            Some(ruoqa_mcp::github::GitHub::new(
+                &github.uri(),
+                token.map(str::to_string),
+            )),
+        )
+        .await;
+
+        call(
+            &client,
+            "clone_job",
+            json!({"job_id": 7, "github_ref": PR_URL, "dry_run": true}),
+        )
+        .await
+        .expect("call_tool");
+
+        let requests = github.received_requests().await.expect("recorded requests");
+        assert_eq!(requests.len(), 1);
+        let header = requests[0]
+            .headers
+            .get("authorization")
+            .map(|v| v.to_str().unwrap().to_string());
+        assert_eq!(header, token.map(|t| format!("Bearer {t}")));
+        assert!(requests[0].headers.get("user-agent").is_some());
+    }
+}
+
+#[tokio::test]
+async fn clone_job_github_failures_map_to_kinds_and_touch_nothing() {
+    for (status, headers, kind) in [
+        (404, vec![], "not_found"),
+        (403, vec![("x-ratelimit-remaining", "0")], "rate_limited"),
+        (401, vec![], "unauthorized"),
+    ] {
+        let openqa = MockServer::start().await;
+        let github = MockServer::start().await;
+        let mut response = ResponseTemplate::new(status).set_body_json(json!({"message": "m"}));
+        for (name, value) in headers {
+            response = response.insert_header(name, value);
+        }
+        Mock::given(method("GET"))
+            .respond_with(response)
+            .mount(&github)
+            .await;
+        let client = clone_server(
+            &openqa,
+            Some(ruoqa_mcp::github::GitHub::new(&github.uri(), None)),
+        )
+        .await;
+
+        let result = call(
+            &client,
+            "clone_job",
+            json!({"job_id": 7, "github_ref": PR_URL}),
+        )
+        .await
+        .expect("call_tool");
+
+        assert_eq!(result.is_error, Some(true), "{status}");
+        assert_eq!(text(&result)["error"]["kind"], kind, "{status}");
+        assert!(
+            openqa
+                .received_requests()
+                .await
+                .expect("recorded requests")
+                .is_empty(),
+            "{status}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn clone_job_github_missing_vars_json_asks_for_productdir() {
+    let openqa = MockServer::start().await;
+    let github = MockServer::start().await;
+    mount_pull(&github).await;
+    mount_clone_job(&openqa, 7, json!({})).await;
+    mount_clone_create(&openqa, json!({"7": 107})).await;
+    let client = clone_server(
+        &openqa,
+        Some(ruoqa_mcp::github::GitHub::new(&github.uri(), None)),
+    )
+    .await;
+
+    let result = call(
+        &client,
+        "clone_job",
+        json!({"job_id": 7, "github_ref": PR_URL}),
+    )
+    .await
+    .expect("call_tool");
+
+    assert_eq!(result.is_error, Some(true));
+    let error = &text(&result)["error"];
+    assert_eq!(error["kind"], "not_found");
+    assert!(error["message"].as_str().unwrap().contains("PRODUCTDIR="));
+    assert!(posts(&openqa).await.is_empty());
+}
+
+#[tokio::test]
+async fn clone_job_github_caller_productdir_wins_and_skips_vars_json() {
+    let openqa = MockServer::start().await;
+    let github = MockServer::start().await;
+    mount_pull(&github).await;
+    mount_clone_job(&openqa, 7, json!({})).await;
+    mount_clone_create(&openqa, json!({"7": 107})).await;
+    let client = clone_server(
+        &openqa,
+        Some(ruoqa_mcp::github::GitHub::new(&github.uri(), None)),
+    )
+    .await;
+
+    let result = call(
+        &client,
+        "clone_job",
+        json!({"job_id": 7, "github_ref": PR_URL, "settings": ["PRODUCTDIR=x"]}),
+    )
+    .await
+    .expect("call_tool");
+
+    let requests = openqa.received_requests().await.expect("recorded requests");
+    assert!(
+        requests
+            .iter()
+            .all(|r| !r.url.path().ends_with("vars.json"))
+    );
+    assert_eq!(form_of(&posts(&openqa).await[0])["PRODUCTDIR:7"], "x");
+    let derived = text(&result)["derived_settings"].clone();
+    assert!(
+        !derived
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d.as_str().unwrap().starts_with("PRODUCTDIR="))
+    );
+}
+
+#[tokio::test]
+async fn clone_job_github_explicit_flags_override_the_helper_defaults() {
+    let openqa = MockServer::start().await;
+    let github = MockServer::start().await;
+    mount_pull(&github).await;
+    mount_vars(&openqa, 42).await;
+    mount_clone_job(&openqa, 42, json!({"parents": {"Chained": [40]}})).await;
+    mount_clone_job(&openqa, 40, json!({"settings": {"TEST": "install"}})).await;
+    mount_clone_create(&openqa, json!({"40": 140, "42": 142})).await;
+    let client = clone_server(
+        &openqa,
+        Some(ruoqa_mcp::github::GitHub::new(&github.uri(), None)),
+    )
+    .await;
+
+    call(
+        &client,
+        "clone_job",
+        json!({
+            "job_id": 42,
+            "github_ref": PR_URL,
+            "skip_chained_deps": false,
+            "parental_inheritance": false
+        }),
+    )
+    .await
+    .expect("call_tool");
+
+    let form = form_of(&posts(&openqa).await[0]);
+    assert_eq!(form["TEST:40"], "install");
+    assert_eq!(
+        form["_GROUP:40"], "0",
+        "global settings still reach parents"
+    );
+    assert!(!form.contains_key("CASEDIR:40"));
+}
+
+#[tokio::test]
+async fn clone_job_github_rejects_other_hosts_without_any_request() {
+    let openqa = MockServer::start().await;
+    let github = MockServer::start().await;
+    let client = clone_server(
+        &openqa,
+        Some(ruoqa_mcp::github::GitHub::new(&github.uri(), None)),
+    )
+    .await;
+
+    let err = call(
+        &client,
+        "clone_job",
+        json!({"job_id": 7, "github_ref": "https://gitlab.com/user/repo/pull/1"}),
+    )
+    .await
+    .expect_err("non-github host");
+    assert!(err.to_string().contains("github.com"), "{err}");
+
+    for server in [&openqa, &github] {
+        assert!(
+            server
+                .received_requests()
+                .await
+                .expect("recorded requests")
+                .is_empty()
+        );
+    }
 }

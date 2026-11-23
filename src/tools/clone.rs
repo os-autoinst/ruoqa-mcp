@@ -394,6 +394,56 @@ pub(crate) fn warnings(plan: &Plan, cache: &HashMap<i64, Job>) -> Option<Value> 
     (!out.is_empty()).then_some(Value::Object(out))
 }
 
+/// Where a `github_ref` clone points the job's test code.
+pub(crate) struct Refspec<'a> {
+    /// `<owner>/<repo>` of the fork the branch lives in.
+    pub(crate) repo: &'a str,
+    pub(crate) branch: &'a str,
+    pub(crate) pull_number: Option<u64>,
+}
+
+/// The arguments `openqa-clone-custom-git-refspec` passes to `openqa-clone-job`.
+pub(crate) fn refspec_args(refspec: &Refspec<'_>, productdir: Option<&str>) -> Vec<String> {
+    let Refspec {
+        repo,
+        branch,
+        pull_number,
+    } = refspec;
+    let build_ref = pull_number.map_or_else(|| (*branch).to_string(), |n| n.to_string());
+    let mut args = vec![
+        "_GROUP=0".to_string(),
+        format!("TEST+=@{repo}#{branch}"),
+        format!("BUILD={repo}#{build_ref}"),
+        format!("CASEDIR=https://github.com/{repo}.git#{branch}"),
+    ];
+    if let Some(productdir) = productdir {
+        args.push(format!("PRODUCTDIR={productdir}"));
+    }
+    args
+}
+
+/// Point the original job's `PRODUCTDIR` at the checked-out fork: strip the
+/// old case directory (absolute `PRODUCTDIR`) or everything through the
+/// case directory's basename (relative), prefix the repo name, and collapse
+/// the first `//`.
+pub(crate) fn derive_productdir(
+    old_casedir: &str,
+    old_productdir: &str,
+    repo_basename: &str,
+) -> String {
+    let rest = if old_productdir.starts_with('/') {
+        old_productdir
+            .strip_prefix(old_casedir)
+            .unwrap_or(old_productdir)
+    } else {
+        let basename = old_casedir.rsplit('/').next().unwrap_or(old_casedir);
+        old_productdir
+            .find(basename)
+            .map_or(old_productdir, |at| &old_productdir[at + basename.len()..])
+    };
+    format!("{repo_basename}/{rest}").replacen("//", "/", 1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -978,5 +1028,61 @@ mod tests {
         assert_eq!(j.children.parallel, vec![9]);
         assert_eq!(j.missing_assets, vec!["hdd/a.qcow2"]);
         assert!(Job::from_json(&json!({"nope": 1})).is_err());
+    }
+
+    #[test]
+    fn productdir_cases_match_upstream() {
+        assert_eq!(
+            derive_productdir("/my/case/dir", "/my/case/dir/product", "repo"),
+            "repo/product"
+        );
+        assert_eq!(
+            derive_productdir("my/distri", "distri/products/sle", "repo"),
+            "repo/products/sle"
+        );
+        assert_eq!(
+            derive_productdir("/my/distri", "products/sle", "repo"),
+            "repo/products/sle"
+        );
+        assert_eq!(
+            derive_productdir(
+                "/openqa/cache/openqa1-opensuse/tests/opensuse",
+                "/openqa/cache/openqa1-opensuse/tests/opensuse/products/opensuse",
+                "repo"
+            ),
+            "repo/products/opensuse"
+        );
+    }
+
+    #[test]
+    fn refspec_args_match_upstream_order_and_values() {
+        let pr = refspec_args(
+            &Refspec {
+                repo: "user/repo",
+                branch: "my/branch",
+                pull_number: Some(9128),
+            },
+            Some("repo/product"),
+        );
+        assert_eq!(
+            pr,
+            [
+                "_GROUP=0",
+                "TEST+=@user/repo#my/branch",
+                "BUILD=user/repo#9128",
+                "CASEDIR=https://github.com/user/repo.git#my/branch",
+                "PRODUCTDIR=repo/product",
+            ]
+        );
+        let branch = refspec_args(
+            &Refspec {
+                repo: "user/repo",
+                branch: "my/branch",
+                pull_number: None,
+            },
+            None,
+        );
+        assert_eq!(branch[2], "BUILD=user/repo#my/branch");
+        assert_eq!(branch.len(), 4);
     }
 }

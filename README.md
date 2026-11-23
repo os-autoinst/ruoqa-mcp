@@ -49,6 +49,7 @@ to the openQA client config file for credentials.
 | `OPENQA_API_SECRET` | *(unset)* | API secret, read by `ruoqa` itself; overrides the config file when set. Only valid with a single configured server — see below. |
 | `OPENQA_USERNAME` | *(unset)* | openQA username; switches from HMAC signing to personal-access-token (Bearer) auth, sending `Authorization: Bearer <username>:<key>:<secret>` instead of `X-API-*` headers. Requires `OPENQA_API_KEY`/`OPENQA_API_SECRET` (or a matching `client.conf` section). Only valid with a single configured server. Rejected over plaintext `http://` to a non-loopback host. |
 | `OPENQA_VERIFY` | `true` | TLS verification: `true`/`false`, or a path to a PEM CA bundle. See the warning below before using `false`. |
+| `GITHUB_TOKEN` | *(unset)* | Optional GitHub token, used only to resolve a pull-request URL in `clone_job`'s `github_ref` (an outbound HTTPS call to `api.github.com`). Needed for private repositories and to avoid GitHub's unauthenticated limit of 60 requests per hour per egress IP. |
 | `OPENQA_MCP_TIMEOUT` | `30.0` | Per-request HTTP timeout (seconds) for openQA calls; raise for slow queries like large `latest=1` failed-job lists. `<=0` disables the timeout. Empty/unset uses the default; unparseable, `NaN`, infinite, or out-of-range values abort startup. |
 | `OPENQA_MCP_CALL_TIMEOUT` | `300.0` | Whole-tool-call deadline (seconds), independent of `OPENQA_MCP_TIMEOUT`; bounds a slow upstream regardless of which tool is waiting on it. `<=0` disables it. Empty/unset uses the default; unparseable, `NaN`, infinite, or out-of-range values abort startup. |
 
@@ -336,6 +337,16 @@ credentials, so it is unavailable to a read-scope HTTP token even with
   credential cannot read secrets; they clone as `[redacted]`), and
   `missing_assets` lists assets the clones still reference that no longer exist
   and no cloned job publishes. Warnings never block the clone.
+- `github_ref` (`https://github.com/<owner>/<repo>/pull/<n>` or
+  `.../tree/<branch>`) does what `openqa-clone-custom-git-refspec` does: it
+  prepends `_GROUP=0`, `TEST+=@<repo>#<branch>`, `BUILD=<repo>#<pr or branch>`,
+  `CASEDIR=https://github.com/<repo>.git#<branch>` and a `PRODUCTDIR` derived
+  from the job's `vars.json` (skipped when `settings` has an unscoped
+  `PRODUCTDIR=`), and defaults `skip_chained_deps` and `parental_inheritance`
+  to true; entries in `settings` and explicit flags win. A PR URL costs one
+  GitHub API call to find the PR's head repository and branch (`GITHUB_TOKEN`
+  optional; see the environment table); a branch URL needs none. The reply
+  lists what was derived under `derived_settings`.
 
 The reservation tools need an operator account. `reserve_worker` and
 `release_worker` take `worker` as a numeric id or `host:instance`; a host
