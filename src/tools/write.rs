@@ -600,6 +600,8 @@ warnings.",
                     ));
                 }
                 Err(PlanError::Need(id)) => {
+                    // check_assets even with ignore_missing_assets (upstream drops
+                    // it) so the reply still warns about what was ignored.
                     let path = Query::new()
                         .push("unredacted", Some(1))
                         .push("check_assets", Some(1))

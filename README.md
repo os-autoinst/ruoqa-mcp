@@ -378,9 +378,11 @@ A tool call fails one of two ways:
   `connection`, `timeout`, `response_too_large` (openQA's body, or the tool's
   result, exceeded its size limit; see below), `invalid_response`,
   `unsupported_media` (a `get_job_log` artifact that isn't text, e.g. a
-  video or image), `audit_unavailable` (the audit stream cannot persist and
-  the configured [fail mode](docs/observability.md#fail-modes) refuses the
-  call — openQA was never asked).
+  video or image), `missing_assets` (a `clone_job` clone still references an
+  asset that no longer exists; nothing was created), `audit_unavailable` (the
+  audit stream cannot persist and the configured
+  [fail mode](docs/observability.md#fail-modes) refuses the call — openQA was
+  never asked).
 - **The server itself is misconfigured or refused to route the request**
   (bad `client.conf`, TLS setup failure, incomplete credentials, a
   cross-origin or outside-base-URL request). This is a JSON-RPC
