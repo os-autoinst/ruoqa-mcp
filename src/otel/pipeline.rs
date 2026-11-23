@@ -212,6 +212,7 @@ pub(crate) struct Exporter {
     max_queue_size: usize,
     dropped: Arc<Dropped>,
     health: Arc<Health>,
+    unresolved: Arc<AtomicU64>,
     cancel: CancellationToken,
     task: JoinHandle<()>,
 }
@@ -239,6 +240,7 @@ impl Exporter {
         let (tx, rx) = mpsc::channel(queue.max_queue_size);
         let dropped = Arc::new(Dropped::default());
         let health = Arc::new(Health::new());
+        let unresolved = Arc::new(AtomicU64::new(0));
         let cancel = CancellationToken::new();
         let task = tokio::spawn(run_task(
             rx,
@@ -252,12 +254,14 @@ impl Exporter {
             encode_batch,
             Arc::clone(&dropped),
             Arc::clone(&health),
+            Arc::clone(&unresolved),
         ));
         Self {
             tx,
             max_queue_size: queue.max_queue_size,
             dropped,
             health,
+            unresolved,
             cancel,
             task,
         }
@@ -288,20 +292,38 @@ impl Exporter {
     /// bounded by `budget`. Cooperative cancellation, not `abort()`: if the
     /// task has not finished within `budget`, whatever was still queued is
     /// accounted as lost to `shutdown` and the task is left to finish
-    /// detached rather than killed mid-request.
+    /// detached rather than killed mid-request. Records the task had already
+    /// taken off the queue (its batch, or an export in flight) count as lost
+    /// too; so do all of them if the task panicked.
     pub(crate) async fn shutdown(self, budget: Duration) {
         let Self {
             tx,
             max_queue_size,
             dropped,
             health: _,
+            unresolved,
             cancel,
             task,
         } = self;
         cancel.cancel();
-        if tokio::time::timeout(budget, task).await.is_err() {
-            let pending = (max_queue_size - tx.capacity()) as u64;
-            dropped.record(DropReason::Shutdown, pending);
+        let finished = match tokio::time::timeout(budget, task).await {
+            Ok(Ok(())) => true,
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    target: "ruoqa_mcp::otel",
+                    panicked = e.is_panic(),
+                    "OTLP export task ended abnormally"
+                );
+                false
+            }
+            Err(_) => false,
+        };
+        if !finished {
+            let queued = (max_queue_size - tx.capacity()) as u64;
+            dropped.record(
+                DropReason::Shutdown,
+                queued + unresolved.load(Ordering::Relaxed),
+            );
         }
     }
 }
@@ -322,7 +344,9 @@ async fn run_task(
     encode_batch: EncodeBatch,
     dropped: Arc<Dropped>,
     health: Arc<Health>,
+    unresolved: Arc<AtomicU64>,
 ) {
+    let _panic_guard = PanicGuard(Arc::clone(&health));
     let mut batch: Vec<Vec<u8>> = Vec::new();
     let sleep = tokio::time::sleep(schedule_delay);
     tokio::pin!(sleep);
@@ -331,18 +355,19 @@ async fn run_task(
             biased;
             () = cancel.cancelled() => break,
             () = &mut sleep, if !batch.is_empty() => {
-                export(&cancel, &client, &endpoint, &headers, timeout, &encode_batch, &mut batch, &dropped, &health).await;
+                export(&cancel, &client, &endpoint, &headers, timeout, &encode_batch, &mut batch, &dropped, &health, &unresolved).await;
             }
             received = rx.recv() => {
                 match received {
                     Some(record) => {
+                        unresolved.fetch_add(1, Ordering::Relaxed);
                         // The deadline runs from the batch's first record, not the latest.
                         if batch.is_empty() {
                             sleep.as_mut().reset(tokio::time::Instant::now() + schedule_delay);
                         }
                         batch.push(record);
                         if batch.len() >= max_export_batch_size {
-                            export(&cancel, &client, &endpoint, &headers, timeout, &encode_batch, &mut batch, &dropped, &health).await;
+                            export(&cancel, &client, &endpoint, &headers, timeout, &encode_batch, &mut batch, &dropped, &health, &unresolved).await;
                         }
                     }
                     None => break,
@@ -353,6 +378,7 @@ async fn run_task(
     // Best-effort final flush: drain whatever is already queued (no more
     // waiting) and export it before the task exits.
     while let Ok(record) = rx.try_recv() {
+        unresolved.fetch_add(1, Ordering::Relaxed);
         batch.push(record);
     }
     if !batch.is_empty() {
@@ -366,8 +392,21 @@ async fn run_task(
             &mut batch,
             &dropped,
             &health,
+            &unresolved,
         )
         .await;
+    }
+}
+
+/// A panicked export task can no longer deliver anything; flip `Health` so the
+/// audit gate stops trusting it.
+struct PanicGuard(Arc<Health>);
+
+impl Drop for PanicGuard {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.fail();
+        }
     }
 }
 
@@ -385,6 +424,7 @@ async fn export(
     batch: &mut Vec<Vec<u8>>,
     dropped: &Dropped,
     health: &Health,
+    unresolved: &AtomicU64,
 ) {
     let records = std::mem::take(batch);
     let count = records.len() as u64;
@@ -392,8 +432,9 @@ async fn export(
 
     // The response body/error is deliberately not logged: an endpoint may
     // carry credentials in its userinfo.
-    let reason = match send_with_retry(client, endpoint, headers, timeout, body, Some(cancel)).await
-    {
+    let result = send_with_retry(client, endpoint, headers, timeout, body, Some(cancel)).await;
+    unresolved.fetch_sub(count, Ordering::Relaxed);
+    let reason = match result {
         Ok(()) => return health.ok(),
         // Shutdown cut the backoff short; the collector did nothing wrong.
         Err(SendError::Cancelled) => return dropped.record(DropReason::Shutdown, count),
@@ -775,6 +816,74 @@ mod tests {
         assert_eq!(dropped.get(DropReason::Shutdown), 1);
         assert_eq!(dropped.get(DropReason::Network), 0);
         assert_eq!(dropped.get(DropReason::HttpStatus), 0);
+    }
+
+    /// A panicked export task must not leave `Health` claiming delivery, and
+    /// the records it was holding must show up as shutdown losses.
+    #[tokio::test]
+    async fn panicked_task_fails_health_and_is_reported() {
+        let queue = QueueConfig {
+            max_queue_size: 8,
+            max_export_batch_size: 1,
+            schedule_delay: Duration::from_secs(3600),
+        };
+        let client = reqwest::Client::new();
+        let endpoint = Url::parse("http://127.0.0.1:1/v1/logs").unwrap();
+        let encode_batch: EncodeBatch = Arc::new(|_: &[Vec<u8>]| panic!("encode failed"));
+        let exporter = Exporter::start(
+            client,
+            endpoint,
+            HeaderMap::new(),
+            Duration::from_secs(1),
+            queue,
+            encode_batch,
+        );
+        let health = exporter.health();
+
+        exporter.producer().enqueue(vec![1]);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!health.is_delivering(), "a dead task must not look healthy");
+
+        let start = std::time::Instant::now();
+        let dropped = Arc::clone(&exporter.dropped);
+        exporter.shutdown(Duration::from_secs(5)).await;
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(dropped.get(DropReason::Shutdown) >= 1);
+    }
+
+    /// A batch already off the queue and stuck in an export is still lost
+    /// when the shutdown budget runs out, even though the queue is empty.
+    #[tokio::test]
+    async fn shutdown_timeout_counts_the_in_flight_batch() {
+        let collector = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_delay(Duration::from_secs(10)))
+            .mount(&collector)
+            .await;
+
+        let queue = QueueConfig {
+            max_queue_size: 8,
+            max_export_batch_size: 1,
+            schedule_delay: Duration::from_secs(3600),
+        };
+        let client = reqwest::Client::new();
+        let endpoint = Url::parse(&format!("{}/v1/logs", collector.uri())).unwrap();
+        let encode_batch: EncodeBatch = Arc::new(|records: &[Vec<u8>]| records.concat());
+        let exporter = Exporter::start(
+            client,
+            endpoint,
+            HeaderMap::new(),
+            Duration::from_secs(5),
+            queue,
+            encode_batch,
+        );
+
+        exporter.producer().enqueue(vec![1]);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let dropped = Arc::clone(&exporter.dropped);
+        exporter.shutdown(Duration::from_millis(50)).await;
+        assert_eq!(dropped.get(DropReason::Shutdown), 1);
     }
 
     /// The gate's precondition: `Health` starts delivering, goes false on a
