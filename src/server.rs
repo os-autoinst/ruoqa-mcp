@@ -155,6 +155,9 @@ setting overrides, e.g. to verify a test-code fix.";
 /// a caller learns that it may not do this, not how the gate is wired.
 const DENIED: &str = "this credential is not authorized for mutating tools";
 
+/// The `tool` metric attribute for any name the router does not know.
+const UNKNOWN_TOOL: &str = "unknown";
+
 /// Mirrors `config::call_timeout`'s default; kept here too so a bare `new`
 /// (as used by tests) still gets a deadline without every caller opting in.
 const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_mins(5);
@@ -315,6 +318,16 @@ impl OpenQaServer {
             RecordScope::Read
         } else {
             RecordScope::Write
+        }
+    }
+
+    /// The `tool` metric attribute for `name`: client-chosen names that are
+    /// not registered tools collapse into one series so cardinality stays bounded.
+    fn metric_tool<'a>(&self, name: &'a str) -> &'a str {
+        if self.tool_router.get(name).is_some() {
+            name
+        } else {
+            UNKNOWN_TOOL
         }
     }
 
@@ -640,7 +653,7 @@ impl ServerHandler for OpenQaServer {
 
         if let Some(metrics) = &self.metrics {
             metrics.record_call(
-                &tool,
+                self.metric_tool(&tool),
                 server.as_deref(),
                 outcome_str(&outcome),
                 error_kind,
@@ -788,6 +801,24 @@ mod tests {
             clients.insert(id.to_string(), client);
         }
         ServerRegistry::from_map(clients)
+    }
+
+    #[test]
+    fn metric_tool_keeps_registered_names() {
+        let server = OpenQaServer::new(fixture_registry(), false);
+        assert_eq!(server.metric_tool("get_job"), "get_job");
+    }
+
+    #[test]
+    fn metric_tool_folds_unknown_names() {
+        let server = OpenQaServer::new(fixture_registry(), false);
+        assert_eq!(server.metric_tool("no_such_tool"), UNKNOWN_TOOL);
+    }
+
+    #[test]
+    fn no_registered_tool_is_named_unknown() {
+        let server = OpenQaServer::new(fixture_registry(), false);
+        assert!(server.tool_router.get(UNKNOWN_TOOL).is_none());
     }
 
     #[test]
