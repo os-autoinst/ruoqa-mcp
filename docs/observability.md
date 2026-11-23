@@ -28,7 +28,7 @@ is omitted (not `null`) when it does not apply:
 | --- | --- | --- | --- |
 | `v` | integer | always | Schema version, `1`. |
 | `ts` | string | always | RFC 3339 timestamp, millisecond precision, UTC. |
-| `seq` | integer | always | Per-process, monotonically increasing sequence number, starting at `1`. |
+| `seq` | integer | always | Per-process, monotonically increasing sequence number, starting at `1`. A failed file append still spends its `seq`, so in a file-only stream the missing numbers equal the following `audit_gap`'s `count`. |
 | `session` | string | always | `Mcp-Session-Id` for an HTTP call; a per-process id (`p<pid>-<start_ms>`) for stdio and for `initialize`, which has no session id yet. |
 | `transport` | string | always | `stdio` or `http`. |
 | `scope` | string | always | `read`, `write`, or `none` for a session-level event. |
@@ -54,10 +54,13 @@ Only an allow-listed set of argument names is recorded verbatim (`server`,
 `comment_id`, `scheduled_product_id`, `asset_id`, `bugid`, `build`, `distri`,
 `version`, `flavor`, `arch`, `machine`, `test`, `result`, `state`, `group`,
 `text`, `title`, `prio`, `force`, `dup_type_auto`, `filename`, `member`,
-`tool`, `tier`) — deny-by-default, so a tool gaining a new argument is
-invisible in the audit stream until it is added to this list. An allow-listed
-array longer than 20 elements, and every other argument regardless of name,
-is summarized as `{"_len": n}` (string length, array length, or object key
+`tool`, `tier`, `worker`, `host`) — deny-by-default, so a tool gaining a new
+argument is invisible in the audit stream until it is added to this list. An
+allow-listed string longer than 1024 bytes is recorded as `{"_len": n, "_head": "..."}`
+with its first 1024 bytes (cut on a character boundary). An allow-listed
+array longer than 20 elements, any other allow-listed array or object whose
+JSON exceeds 4096 bytes, and every other argument regardless of name, is
+summarized as `{"_len": n}` (string length, array length, or object key
 count). Tool *results* are never recorded, only the call.
 
 ### File handling
@@ -118,7 +121,11 @@ not attempted, not how the gate is wired.
 
 When persistence recovers, an `audit_gap` record is written with `count` (how
 many appends failed), `since` (when the first one failed), and `refused` (how
-many calls the gate turned away during the outage).
+many calls the gate turned away during the outage). The record is appended
+before the gap is cleared and the gate reopens; if that append itself fails,
+the gap stays pending and the next successful write retries it. A failed
+append spends its `seq`, so in a file-only stream the missing `seq` numbers
+equal the following gap's `count`.
 
 ## OTLP export
 
@@ -191,9 +198,9 @@ line, the diagnostics logs, and the trace for one call by trace/span id and
 `ruoqa.stream`.
 
 > The exported audit stream is exactly as sensitive as the audit file — it
-> carries comment text and other tool arguments verbatim, which is the point
-> of an audit trail. Treat the collector and its storage with the same care
-> as the audit file itself.
+> carries comment text (its first 1 KiB) and other allow-listed tool
+> arguments, which is the point of an audit trail. Treat the collector and its
+> storage with the same care as the audit file itself.
 
 > `OTEL_EXPORTER_OTLP_HEADERS` (and its per-signal variants) is a
 > **credential**: environment-only, with no CLI flag and no audit-config key,

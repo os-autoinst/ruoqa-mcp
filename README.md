@@ -611,8 +611,9 @@ configured, and turning one on has no effect on the other.
 
 Two things worth knowing before enabling either: the exported audit stream is
 exactly as sensitive as the file it mirrors, since it carries comment text
-and other arguments verbatim; and `OTEL_EXPORTER_OTLP_HEADERS` is a
-credential, so it is environment-only and never logged.
+(its first 1 KiB) and other allow-listed arguments; and
+`OTEL_EXPORTER_OTLP_HEADERS` is a credential, so it is environment-only and
+never logged.
 
 See [`docs/observability.md`](docs/observability.md) for the full variable
 and key tables, the record schema, and the fail-mode semantics.
