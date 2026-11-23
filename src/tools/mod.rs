@@ -41,6 +41,13 @@ pub(crate) const MAX_NEEDLE_LIST: usize = 20;
 /// `get_step_needles`: bytes held back from the result cap for the JSON
 /// block and the per-block envelope when budgeting images.
 pub(crate) const RESULT_RESERVE: usize = 64 * 1024;
+/// `get_job_log.tail_lines`: ~20 MB of window at the assumed line size, under
+/// the artifact ceiling.
+pub(crate) const MAX_TAIL_LINES: usize = 100_000;
+/// `get_job_log.context_lines`: lines of grep context either side of a match.
+pub(crate) const MAX_CONTEXT_LINES: usize = 100;
+/// `get_job_log.max_matches`: matching lines `grep` expands into context.
+pub(crate) const MAX_GREP_MATCHES: usize = 1_000;
 /// Bytes read by the initial `Range: bytes=0-511` probe: enough to sniff
 /// gzip/xz/tar magic bytes and, on a 206, learn the artifact's total size.
 pub(crate) const PROBE_BYTES: u64 = 512;

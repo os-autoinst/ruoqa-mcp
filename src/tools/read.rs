@@ -19,8 +19,9 @@ use crate::summary::{shape_job_groups, summarize_jobs};
 use crate::tools::artifact;
 use crate::tools::{
     DIGEST_CONTEXT_LINES, DIGEST_MAX_HITS, DIGEST_TAIL_LINES, MAX_ARCHIVE_MEMBERS,
-    MAX_ARTIFACT_BYTES, MAX_IDS, MAX_IMAGE_BYTES, MAX_NEEDLE_CANDIDATES, MAX_NEEDLE_LIST,
-    MAX_RESULT_BYTES, PROBE_BYTES, RESULT_RESERVE, bounded,
+    MAX_ARTIFACT_BYTES, MAX_CONTEXT_LINES, MAX_GREP_MATCHES, MAX_IDS, MAX_IMAGE_BYTES,
+    MAX_NEEDLE_CANDIDATES, MAX_NEEDLE_LIST, MAX_RESULT_BYTES, MAX_TAIL_LINES, PROBE_BYTES,
+    RESULT_RESERVE, bounded,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -249,20 +250,24 @@ pub struct GetJobLog {
     pub max_bytes: Option<usize>,
     /// Return only the last N lines. For a plain-text file with no
     /// `member`, this is served by a byte-ranged request instead of a full
-    /// download.
+    /// download. At most 100000.
     #[serde(default)]
+    #[schemars(range(max = MAX_TAIL_LINES))]
     pub tail_lines: Option<usize>,
     /// A regex; only matching lines (plus `context_lines` of surrounding
     /// context) are returned, as `matches` instead of `content`.
     #[serde(default)]
     pub grep: Option<String>,
     /// Lines of context to include around each `grep` match. Ignored
-    /// without `grep`.
+    /// without `grep`. At most 100.
     #[serde(default)]
+    #[schemars(range(max = MAX_CONTEXT_LINES))]
     pub context_lines: Option<usize>,
     /// Caps how many matching lines `grep` expands into context; the true
-    /// count is still reported as `total_matches`. Ignored without `grep`.
+    /// count is still reported as `total_matches`. Ignored without `grep`. At
+    /// most 1000.
     #[serde(default)]
+    #[schemars(range(max = MAX_GREP_MATCHES))]
     pub max_matches: Option<usize>,
 }
 
@@ -1030,9 +1035,12 @@ refused with an `unsupported_media` error.",
         if let Some(member) = &member {
             artifact::validate_member(member)?;
         }
-        let ceiling = max_bytes.map_or(MAX_ARTIFACT_BYTES, |m| m.min(MAX_ARTIFACT_BYTES));
         let context_lines = context_lines.unwrap_or(0);
         let max_matches = max_matches.unwrap_or(artifact::DEFAULT_MAX_MATCHES);
+        bounded("tail_lines", tail_lines.unwrap_or(0), 0, MAX_TAIL_LINES)?;
+        bounded("context_lines", context_lines, 0, MAX_CONTEXT_LINES)?;
+        bounded("max_matches", max_matches, 0, MAX_GREP_MATCHES)?;
+        let ceiling = max_bytes.map_or(MAX_ARTIFACT_BYTES, |m| m.min(MAX_ARTIFACT_BYTES));
 
         let probe =
             match artifact::probe(client, &ctx, job_id, &filename, PROBE_BYTES, ceiling).await {
