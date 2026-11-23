@@ -663,8 +663,8 @@ impl Auditor {
             gap.count += 1;
             return;
         }
-        self.failing.store(false, Ordering::Relaxed);
-        let Some(gap) = guard.gap.take() else {
+        let Some(gap) = guard.gap.as_ref() else {
+            self.failing.store(false, Ordering::Relaxed);
             return;
         };
         let mut gap_record = Record::event(
@@ -674,19 +674,40 @@ impl Auditor {
             Event::AuditGap,
         );
         gap_record.count = Some(gap.count);
-        gap_record.since = Some(gap.since);
+        gap_record.since = Some(gap.since.clone());
         gap_record.refused = Some(gap.refused);
-        gap_record.seq = self.seq.fetch_add(1, Ordering::SeqCst);
+        // Every `seq` mutation happens under the sink lock, so the number is
+        // only claimed (below) once the gap record has actually been stored.
+        let seq = self.seq.load(Ordering::SeqCst);
+        gap_record.seq = seq;
         gap_record.ts = now_rfc3339();
         let gap_line =
             serde_json::to_string(&gap_record).expect("Record serialization cannot fail");
-        if let Some(sink) = guard.sink.as_mut()
-            && let Err(e) = sink.append(&gap_line)
-        {
-            tracing::warn!(error = %e, path = %sink.path.display(), "audit sink append failed");
-        }
-        if let Some(otlp) = &self.otlp {
-            otlp.enqueue(encode_otlp_record(&gap_record, &gap_line));
+        let otlp_twin = || {
+            self.otlp
+                .as_ref()
+                .map(|otlp| otlp.enqueue(encode_otlp_record(&gap_record, &gap_line)))
+        };
+        let stored = if let Some(sink) = guard.sink.as_mut() {
+            match sink.append(&gap_line) {
+                Ok(()) => {
+                    otlp_twin();
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %sink.path.display(), "audit sink append failed");
+                    false
+                }
+            }
+        } else {
+            otlp_twin() == Some(true)
+        };
+        // A gap record that was not stored leaves the outage accounting and
+        // the gate untouched; the next successful write retries it.
+        if stored {
+            self.seq.store(seq + 1, Ordering::SeqCst);
+            guard.gap = None;
+            self.failing.store(false, Ordering::Relaxed);
         }
     }
 
@@ -1323,6 +1344,79 @@ mod tests {
         assert!(gap["seq"].as_u64().unwrap() > recovered_seq);
     }
 
+    /// A failed gap append must not lose the outage accounting: the gap stays
+    /// pending, the gate stays closed and no `seq` is spent on the gap record.
+    #[cfg(unix)]
+    #[test]
+    #[allow(unsafe_code, reason = "geteuid reads process state, no preconditions")]
+    fn failed_gap_append_keeps_the_outage_accounting() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // SAFETY: `geteuid` reads process state, no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!(
+                "skipping failed_gap_append_keeps_the_outage_accounting: \
+                 root ignores directory mode bits"
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        // Smaller than any one record, so every append into a non-empty file rotates.
+        let cfg = AuditConfig::parse(&format!(
+            "path = {:?}\nrotate_max_bytes = 64\n",
+            path.to_str().unwrap()
+        ))
+        .unwrap();
+        let auditor = Auditor::open(&cfg).unwrap();
+        auditor.session_open("s0", Transport::Stdio);
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        auditor.session_open("locked-0", Transport::Stdio);
+        auditor.session_open("locked-1", Transport::Stdio);
+        auditor.refused();
+        assert_eq!(gap_count(&auditor), Some(2));
+
+        // Pretend the live file is empty so the next record lands without a
+        // rotation, while the gap record that follows has to rotate and fails.
+        auditor.sink.lock().unwrap().sink.as_mut().unwrap().len = 0;
+        auditor.session_open("lands", Transport::Stdio);
+
+        assert!(auditor.failing.load(Ordering::Relaxed));
+        {
+            let guard = auditor.sink.lock().unwrap();
+            let gap = guard.gap.as_ref().expect("gap kept after a failed append");
+            assert_eq!((gap.count, gap.refused), (2, 1));
+        }
+        assert_eq!(
+            auditor.seq.load(Ordering::SeqCst),
+            5,
+            "no seq spent on the gap"
+        );
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        auditor.session_open("recovered", Transport::Stdio);
+        assert!(!auditor.failing.load(Ordering::Relaxed));
+        assert_eq!(gap_count(&auditor), None);
+
+        let mut lines: Vec<Value> = (1..=8)
+            .rev()
+            .map(|n| numbered(&path, n))
+            .filter(|p| p.exists())
+            .flat_map(|p| read_all_lines(&p))
+            .collect();
+        lines.extend(read_all_lines(&path));
+        let gaps: Vec<&Value> = lines.iter().filter(|l| l["event"] == "audit_gap").collect();
+        assert_eq!(gaps.len(), 1, "exactly one audit_gap line: {lines:?}");
+        assert_eq!(
+            (gaps[0]["count"].as_u64(), gaps[0]["refused"].as_u64()),
+            (Some(2), Some(1))
+        );
+        let seqs: Vec<u64> = lines.iter().map(|l| l["seq"].as_u64().unwrap()).collect();
+        assert_eq!(seqs, [1, 4, 5, 6], "holes only for the two failed records");
+    }
+
     /// `refused()` alone (no append ever failed) still creates a gap: the
     /// outage was detected by delivery health, not by a failed append.
     #[test]
@@ -1463,6 +1557,38 @@ mod tests {
 
         assert!(auditor.failing.load(Ordering::Relaxed));
         assert_eq!(gap_count(&auditor), Some(1));
+    }
+
+    #[test]
+    fn otlp_only_refused_gap_record_keeps_the_gap() {
+        let cfg = AuditConfig::parse("path = \"none\"\n").unwrap();
+        let (producer, mut rx) = stub_producer_with_capacity(2);
+        let auditor = Auditor::open(&cfg).unwrap().with_otlp(producer);
+
+        for i in 0..3 {
+            auditor.session_open(format!("s{i}"), Transport::Stdio);
+        }
+        assert_eq!(gap_count(&auditor), Some(1));
+
+        // One free slot: the recovering record fits, its gap record does not.
+        rx.try_recv().unwrap();
+        auditor.session_open("s3", Transport::Stdio);
+        assert!(auditor.failing.load(Ordering::Relaxed));
+        assert_eq!(gap_count(&auditor), Some(1));
+        assert_eq!(
+            auditor.seq.load(Ordering::SeqCst),
+            5,
+            "no seq spent on the gap"
+        );
+
+        while rx.try_recv().is_ok() {}
+        auditor.session_open("s4", Transport::Stdio);
+        assert!(!auditor.failing.load(Ordering::Relaxed));
+        assert_eq!(gap_count(&auditor), None);
+        assert!(contains(&rx.try_recv().unwrap(), "session_open"));
+        let gap = rx.try_recv().unwrap();
+        assert!(contains(&gap, "audit_gap"));
+        assert!(contains(&gap, "\"count\":1"));
     }
 
     #[test]
