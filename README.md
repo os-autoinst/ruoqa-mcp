@@ -267,8 +267,10 @@ are ordered by mean `similarity`, then name. Each image is capped at 4 MiB.
 A needle whose image can't be fetched (e.g. deleted or renamed since the
 job ran) is reported as that candidate's `image_error` and the call still
 succeeds; a screenshot that can't be
-fetched, isn't a PNG, or is missing fails the call. Every candidate carries
-an `image_url` too, for clients that don't render images.
+fetched, isn't a PNG, or is missing fails the call. A needle image that
+would push the reply over 8 MiB is skipped the same way. The `needles` list
+holds at most 20 candidates, best first; `needle_count` is the total. Every
+candidate carries an `image_url` too, for clients that don't render images.
 
 ### Mutating tools (require credentials)
 
