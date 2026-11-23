@@ -257,7 +257,9 @@ pub(crate) struct TailFetch {
 /// Byte window to request for `tail_lines` lines, given the artifact's
 /// (possibly unknown) total size.
 pub(crate) fn tail_window(tail_lines: usize, size: Option<u64>, ceiling: u64) -> u64 {
-    let wanted = (tail_lines as u64 * TAIL_BYTES_PER_LINE).max(MIN_TAIL_WINDOW_BYTES);
+    let wanted = (tail_lines as u64)
+        .saturating_mul(TAIL_BYTES_PER_LINE)
+        .max(MIN_TAIL_WINDOW_BYTES);
     let bounded = wanted.min(ceiling);
     size.map_or(bounded, |size| bounded.min(size))
 }
@@ -712,8 +714,8 @@ pub(crate) enum Sliced {
 /// text a caller already tail-ranged: trimming an already-short text to the
 /// same or fewer lines is a no-op). No `grep` → that text as-is. `grep` →
 /// every matching line plus `context_lines` on each side, capped at
-/// `max_matches` matching lines (context lines don't count against it);
-/// `total_matches` still reports the true count.
+/// `max_matches` matching lines (context lines don't count against it) and
+/// never repeating a line; `total_matches` still reports the true count.
 pub(crate) fn slice(
     text: &str,
     tail_lines: Option<usize>,
@@ -744,6 +746,7 @@ fn grep_lines(text: &str, re: &Regex, context_lines: usize, max_matches: usize) 
     let mut hits = Vec::new();
     let mut total = 0usize;
     let mut emitted = 0usize;
+    let mut last_emitted: Option<usize> = None;
     for (idx, line) in lines.iter().enumerate() {
         if !re.is_match(line) {
             continue;
@@ -754,12 +757,18 @@ fn grep_lines(text: &str, re: &Regex, context_lines: usize, max_matches: usize) 
         }
         emitted += 1;
         let from = idx.saturating_sub(context_lines);
-        let to = (idx + context_lines).min(lines.len().saturating_sub(1));
-        for (i, context_line) in lines.iter().enumerate().take(to + 1).skip(from) {
-            hits.push(MatchHit {
-                line: i + 1,
-                text: (*context_line).to_string(),
-            });
+        let to = idx
+            .saturating_add(context_lines)
+            .min(lines.len().saturating_sub(1));
+        let start = last_emitted.map_or(from, |last| from.max(last + 1));
+        if start <= to {
+            for (i, context_line) in lines.iter().enumerate().take(to + 1).skip(start) {
+                hits.push(MatchHit {
+                    line: i + 1,
+                    text: (*context_line).to_string(),
+                });
+            }
+            last_emitted = Some(to);
         }
     }
     GrepMatches {
@@ -1459,6 +1468,28 @@ mod tests {
         assert_eq!(m.total, 4);
         assert_eq!(m.hits.len(), 2);
         assert!(m.truncated);
+    }
+
+    #[test]
+    fn tail_window_saturates() {
+        assert_eq!(tail_window(usize::MAX, None, 1 << 20), 1 << 20);
+        assert_eq!(tail_window(usize::MAX, Some(5 << 20), 1 << 20), 1 << 20);
+    }
+
+    #[test]
+    fn grep_lines_huge_context_does_not_wrap() {
+        let re = Regex::new("b").unwrap();
+        let m = grep_lines("a\nb\nc", &re, usize::MAX, 10);
+        assert_eq!(m.total, 1);
+        assert_eq!(m.hits.iter().map(|h| h.line).collect::<Vec<_>>(), [1, 2, 3]);
+    }
+
+    #[test]
+    fn grep_lines_overlapping_context_emits_each_line_once() {
+        let re = Regex::new("a").unwrap();
+        let m = grep_lines("a\na\na", &re, 1, 10);
+        assert_eq!(m.total, 3);
+        assert_eq!(m.hits.iter().map(|h| h.line).collect::<Vec<_>>(), [1, 2, 3]);
     }
 
     #[test]
