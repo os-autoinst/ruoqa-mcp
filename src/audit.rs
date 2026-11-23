@@ -595,7 +595,8 @@ impl Auditor {
     ///
     /// Persistence health is judged by the file sink's append result when
     /// one is configured; only when there is *no* file sink does the OTLP
-    /// producer's delivery health stand in for it (boundary 3: a working
+    /// producer stand in for it: the record must have been accepted by its
+    /// queue and the export task must be delivering (boundary 3: a working
     /// file sink is never gated by a flaky collector).
     fn write(&self, mut record: Record) {
         let mut guard = self
@@ -609,23 +610,23 @@ impl Auditor {
         record.ts = now_rfc3339();
         let line = serde_json::to_string(&record).expect("Record serialization cannot fail");
 
-        let persisted = if let Some(sink) = guard.sink.as_mut() {
-            match sink.append(&line) {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::warn!(error = %e, path = %sink.path.display(), "audit sink append failed");
-                    false
-                }
+        let appended = guard.sink.as_mut().map(|sink| match sink.append(&line) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, path = %sink.path.display(), "audit sink append failed");
+                false
             }
-        } else {
-            // No file sink reached this point only because `self.otlp` is
-            // `Some` (the early return above covers "neither").
-            self.otlp.as_ref().is_some_and(LogProducer::is_delivering)
-        };
+        });
+        let enqueued = self
+            .otlp
+            .as_ref()
+            .map(|otlp| otlp.enqueue(encode_otlp_record(&record, &line)));
 
-        if let Some(otlp) = &self.otlp {
-            otlp.enqueue(encode_otlp_record(&record, &line));
-        }
+        // Without a file sink `self.otlp` is `Some` (the early return above
+        // covers "neither"), so `enqueued` is `Some` here.
+        let persisted = appended.unwrap_or_else(|| {
+            enqueued == Some(true) && self.otlp.as_ref().is_some_and(LogProducer::is_delivering)
+        });
 
         self.update_gap(&mut guard, persisted, record.transport, &record.ts);
     }
@@ -1344,8 +1345,24 @@ mod tests {
     }
 
     fn stub_producer() -> (LogProducer, tokio::sync::mpsc::Receiver<Vec<u8>>) {
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
+        stub_producer_with_capacity(64)
+    }
+
+    fn stub_producer_with_capacity(
+        capacity: usize,
+    ) -> (LogProducer, tokio::sync::mpsc::Receiver<Vec<u8>>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(capacity);
         (LogProducer::for_test(tx), rx)
+    }
+
+    fn gap_count(auditor: &Auditor) -> Option<u64> {
+        auditor.sink.lock().unwrap().gap.as_ref().map(|g| g.count)
+    }
+
+    fn contains(haystack: &[u8], needle: &str) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|w| w == needle.as_bytes())
     }
 
     #[test]
@@ -1366,6 +1383,74 @@ mod tests {
         assert!(rx.try_recv().is_ok());
         assert!(rx.try_recv().is_ok());
         assert!(rx.try_recv().is_err(), "exactly 3 records enqueued");
+    }
+
+    #[test]
+    fn otlp_only_queue_full_opens_a_gap() {
+        let cfg = AuditConfig::parse("path = \"none\"\n").unwrap();
+        let (producer, _rx) = stub_producer_with_capacity(1);
+        let auditor = Auditor::open(&cfg).unwrap().with_otlp(producer);
+
+        auditor.session_open("s0", Transport::Stdio);
+        assert!(!auditor.failing.load(Ordering::Relaxed));
+        auditor.session_open("s1", Transport::Stdio);
+
+        assert!(auditor.failing.load(Ordering::Relaxed));
+        assert_eq!(gap_count(&auditor), Some(1));
+    }
+
+    #[test]
+    fn otlp_only_closed_queue_opens_a_gap() {
+        let cfg = AuditConfig::parse("path = \"none\"\n").unwrap();
+        let (producer, rx) = stub_producer();
+        drop(rx);
+        let auditor = Auditor::open(&cfg).unwrap().with_otlp(producer);
+
+        auditor.session_open("s0", Transport::Stdio);
+
+        assert!(auditor.failing.load(Ordering::Relaxed));
+        assert_eq!(gap_count(&auditor), Some(1));
+    }
+
+    #[test]
+    fn otlp_only_recovers_after_queue_drains() {
+        let cfg = AuditConfig::parse("path = \"none\"\n").unwrap();
+        let (producer, mut rx) = stub_producer_with_capacity(2);
+        let auditor = Auditor::open(&cfg).unwrap().with_otlp(producer);
+
+        for i in 0..3 {
+            auditor.session_open(format!("s{i}"), Transport::Stdio);
+        }
+        assert!(auditor.failing.load(Ordering::Relaxed));
+        assert_eq!(gap_count(&auditor), Some(1));
+
+        while rx.try_recv().is_ok() {}
+        auditor.session_open("s3", Transport::Stdio);
+
+        assert!(!auditor.failing.load(Ordering::Relaxed));
+        assert_eq!(gap_count(&auditor), None);
+        let recovering = rx.try_recv().unwrap();
+        assert!(contains(&recovering, "session_open"));
+        let gap = rx.try_recv().unwrap();
+        assert!(contains(&gap, "audit_gap"));
+        assert!(contains(&gap, "\"count\":1"));
+    }
+
+    #[test]
+    fn file_sink_ignores_otlp_queue_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let cfg = AuditConfig::parse(&format!("path = {:?}\n", path.to_str().unwrap())).unwrap();
+        let (producer, _rx) = stub_producer_with_capacity(1);
+        let auditor = Auditor::open(&cfg).unwrap().with_otlp(producer);
+
+        for i in 0..3 {
+            auditor.session_open(format!("s{i}"), Transport::Stdio);
+            assert!(!auditor.failing.load(Ordering::Relaxed));
+        }
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
+        assert_eq!(gap_count(&auditor), None);
     }
 
     #[test]
