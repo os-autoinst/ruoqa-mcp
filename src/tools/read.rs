@@ -250,12 +250,14 @@ pub struct GetJobLog {
     pub max_bytes: Option<usize>,
     /// Return only the last N lines. For a plain-text file with no
     /// `member`, this is served by a byte-ranged request instead of a full
-    /// download. At most 100000.
+    /// download. With `grep`, match line numbers count from the start of this
+    /// tail (the reply says `line_base: "tail"`). At most 100000.
     #[serde(default)]
     #[schemars(range(max = MAX_TAIL_LINES))]
     pub tail_lines: Option<usize>,
     /// A regex; only matching lines (plus `context_lines` of surrounding
-    /// context) are returned, as `matches` instead of `content`.
+    /// context) are returned, as `matches` instead of `content`. Line numbers
+    /// are relative to the returned text, so to the tail when `tail_lines` is set.
     #[serde(default)]
     pub grep: Option<String>,
     /// Lines of context to include around each `grep` match. Ignored
@@ -1145,6 +1147,9 @@ refused with an `unsupported_media` error.",
                 reply["matches"] = json!(m.hits);
                 reply["total_matches"] = json!(m.total);
                 reply["truncated"] = json!(m.truncated);
+                if tail_lines.is_some() {
+                    reply["line_base"] = json!("tail");
+                }
             }
         }
         ok(reply)

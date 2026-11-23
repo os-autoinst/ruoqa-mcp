@@ -1697,6 +1697,43 @@ async fn get_job_log_grep_returns_matches_with_context() {
 }
 
 #[tokio::test]
+async fn get_job_log_tail_plus_grep_marks_line_base() {
+    let mock = MockServer::start().await;
+    let body = numbered_lines(1000).into_bytes();
+    let file = std::sync::Arc::new(RangedFile::fixed(body, "etag-1"));
+    let responder = {
+        let file = file.clone();
+        move |req: &Request| file.respond(req)
+    };
+    Mock::given(method("GET"))
+        .and(path("/tests/7/file/autoinst-log.txt"))
+        .respond_with(responder)
+        .mount(&mock)
+        .await;
+    let client = server_with_mock(&mock, true).await;
+
+    let with_tail = call(
+        &client,
+        "get_job_log",
+        json!({"job_id": 7, "filename": "autoinst-log.txt", "tail_lines": 5, "grep": "line0998"}),
+    )
+    .await
+    .expect("call_tool");
+    let value = text(&with_tail);
+    assert_eq!(value["line_base"], "tail");
+    assert_eq!(value["matches"][0]["line"], 4);
+
+    let grep_only = call(
+        &client,
+        "get_job_log",
+        json!({"job_id": 7, "filename": "autoinst-log.txt", "grep": "line0998"}),
+    )
+    .await
+    .expect("call_tool");
+    assert!(text(&grep_only).get("line_base").is_none());
+}
+
+#[tokio::test]
 async fn list_job_logs_parses_downloads_ajax() {
     let mock = MockServer::start().await;
     let html = r#"<a href="/tests/11/file/autoinst-log.txt">autoinst-log.txt</a>
