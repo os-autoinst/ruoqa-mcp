@@ -59,19 +59,31 @@ fn hex_encode(bytes: &[u8]) -> String {
         })
 }
 
-/// Decodes a lowercase (or uppercase) hex string of exactly `2*N` characters
-/// into `N` bytes. Shared by [`parse_traceparent`] and the audit OTLP
-/// bridge, which re-decodes a `Record`'s already-hex-encoded `trace`/`span`
-/// fields to fill `LogRecord.trace_id`/`span_id`.
+/// Decodes a lowercase (or uppercase) hex string of exactly `2*N` bytes
+/// into `N` bytes; any other byte (including `+` and non-ASCII) is `None`.
+/// Shared by [`parse_traceparent`] and the audit OTLP bridge, which
+/// re-decodes a `Record`'s already-hex-encoded `trace`/`span` fields to fill
+/// `LogRecord.trace_id`/`span_id`.
 pub(crate) fn decode_hex<const N: usize>(s: &str) -> Option<[u8; N]> {
-    if s.len() != N * 2 {
+    let bytes = s.as_bytes();
+    if bytes.len() != N * 2 {
         return None;
     }
     let mut out = [0u8; N];
-    for i in 0..N {
-        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    let (pairs, _) = bytes.as_chunks::<2>();
+    for (o, &[hi, lo]) in out.iter_mut().zip(pairs) {
+        *o = (nibble(hi)? << 4) | nibble(lo)?;
     }
     Some(out)
+}
+
+const fn nibble(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
 }
 
 impl SpanCtx {
@@ -306,6 +318,24 @@ mod tests {
         assert_eq!(decode_hex::<8>("zzzzzzzzzzzzzzzz"), None);
     }
 
+    #[test]
+    fn decode_hex_rejects_multibyte_without_panicking() {
+        let s = format!("0é{}", "0".repeat(29));
+        assert_eq!(s.len(), 32);
+        assert_eq!(decode_hex::<16>(&s), None);
+    }
+
+    #[test]
+    fn decode_hex_rejects_sign_prefix() {
+        assert_eq!(decode_hex::<1>("+1"), None);
+        assert_eq!(decode_hex::<8>("+0+0+0+0+0+0+0+0"), None);
+    }
+
+    #[test]
+    fn decode_hex_accepts_uppercase() {
+        assert_eq!(decode_hex::<2>("ABcd"), Some([0xab, 0xcd]));
+    }
+
     const VALID: &str = "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01";
 
     #[test]
@@ -345,12 +375,15 @@ mod tests {
 
     #[test]
     fn parse_traceparent_rejects_malformed_shapes() {
+        let multibyte = format!("00-0é{}-00f067aa0ba902b7-01", "0".repeat(29));
         for bad in [
             "",
             "not-a-traceparent",
             "00-tooshort-00f067aa0ba902b7-01",
             "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7",
             "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-01-extra",
+            "00-0af7651916cd43dd8448eb211c80319c-00f067aa0ba902b7-+1",
+            &multibyte,
         ] {
             assert!(parse_traceparent(bad).is_none(), "{bad:?}");
         }
