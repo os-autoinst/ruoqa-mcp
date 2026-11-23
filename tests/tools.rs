@@ -2416,3 +2416,303 @@ async fn get_step_needles_step_without_screenshot_is_not_found() {
     assert_eq!(result.is_error, Some(true));
     assert_eq!(text(&result)["error"]["kind"], "not_found");
 }
+
+fn clone_job_body(extra: &Value) -> Value {
+    let mut job = json!({"settings": {"TEST": "t"}});
+    for (key, value) in extra.as_object().expect("object") {
+        job[key] = value.clone();
+    }
+    json!({ "job": job })
+}
+
+async fn mount_clone_job(mock: &MockServer, id: i64, extra: Value) {
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/jobs/{id}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(clone_job_body(&extra)))
+        .mount(mock)
+        .await;
+}
+
+async fn mount_clone_create(mock: &MockServer, ids: Value) {
+    Mock::given(method("POST"))
+        .and(path("/api/v1/jobs"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "ids": ids })))
+        .mount(mock)
+        .await;
+}
+
+async fn posts(mock: &MockServer) -> Vec<Request> {
+    mock.received_requests()
+        .await
+        .expect("recorded requests")
+        .into_iter()
+        .filter(|r| r.method.as_str() == "POST")
+        .collect()
+}
+
+fn form_of(request: &Request) -> std::collections::BTreeMap<String, String> {
+    form_urlencoded::parse(&request.body)
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect()
+}
+
+async fn clone_server(mock: &MockServer) -> RunningService<RoleClient, ()> {
+    let client = ruoqa::ClientBuilder::new()
+        .server(mock.uri())
+        .config_paths(vec![])
+        .build()
+        .expect("build client");
+    let mut clients = std::collections::HashMap::new();
+    clients.insert(TEST_SERVER.to_string(), client);
+    let server = OpenQaServer::new(ServerRegistry::from_map(clients), false);
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    tokio::spawn(async move {
+        if let Ok(running) = server.serve(server_transport).await {
+            let _ = running.waiting().await;
+        }
+    });
+    ().serve(client_transport).await.expect("client handshake")
+}
+
+#[tokio::test]
+async fn clone_job_single_job_posts_scoped_settings_and_returns_urls() {
+    let mock = MockServer::start().await;
+    mount_clone_job(
+        &mock,
+        7,
+        json!({"group_id": 21, "settings": {"TEST": "t", "NAME": "n", "HDD_1": "x.qcow2"}}),
+    )
+    .await;
+    mount_clone_create(&mock, json!({"7": 107})).await;
+    let client = clone_server(&mock).await;
+
+    let result = call(
+        &client,
+        "clone_job",
+        json!({"job_id": 7, "settings": ["FOO=bar"]}),
+    )
+    .await
+    .expect("call_tool");
+
+    let requests = mock.received_requests().await.expect("recorded requests");
+    let get = requests
+        .iter()
+        .find(|r| r.method.as_str() == "GET")
+        .expect("a GET");
+    let query = get.url.query().unwrap_or_default();
+    assert!(query.contains("unredacted=1"), "{query}");
+    assert!(query.contains("check_assets=1"), "{query}");
+
+    let posted = posts(&mock).await;
+    assert_eq!(posted.len(), 1);
+    let form = form_of(&posted[0]);
+    assert_eq!(form["TEST:7"], "t");
+    assert_eq!(form["HDD_1:7"], "x.qcow2");
+    assert_eq!(form["FOO:7"], "bar");
+    assert_eq!(form["_GROUP_ID:7"], "21");
+    assert_eq!(form["CLONED_FROM:7"], format!("{}/tests/7", mock.uri()));
+    assert_eq!(form["is_clone_job"], "1");
+    assert!(!form.keys().any(|k| k.starts_with("NAME:")));
+
+    assert_ne!(result.is_error, Some(true));
+    let reply = text(&result);
+    assert_eq!(reply["ids"], json!({"7": 107}));
+    assert_eq!(
+        reply["urls"],
+        json!({"7": format!("{}/tests/107", mock.uri())})
+    );
+    assert!(reply.get("warnings").is_none());
+    assert!(reply.get("derived_settings").is_none());
+}
+
+#[tokio::test]
+async fn clone_job_parallel_parent_is_cloned_and_linked() {
+    let mock = MockServer::start().await;
+    mount_clone_job(&mock, 42, json!({"parents": {"Parallel": [41]}})).await;
+    mount_clone_job(&mock, 41, json!({"settings": {"TEST": "parent"}})).await;
+    mount_clone_create(&mock, json!({"41": 141, "42": 142})).await;
+    let client = clone_server(&mock).await;
+
+    call(&client, "clone_job", json!({"job_id": 42}))
+        .await
+        .expect("call_tool");
+
+    let form = form_of(&posts(&mock).await[0]);
+    assert_eq!(form["_PARALLEL:42"], "41");
+    assert_eq!(form["TEST:41"], "parent");
+    assert_eq!(form["TEST:42"], "t");
+}
+
+#[tokio::test]
+async fn clone_job_skip_chained_deps_never_fetches_the_chained_parent() {
+    let mock = MockServer::start().await;
+    mount_clone_job(&mock, 42, json!({"parents": {"Chained": [41]}})).await;
+    mount_clone_create(&mock, json!({"42": 142})).await;
+    let client = clone_server(&mock).await;
+
+    call(
+        &client,
+        "clone_job",
+        json!({"job_id": 42, "skip_chained_deps": true}),
+    )
+    .await
+    .expect("call_tool");
+
+    let requests = mock.received_requests().await.expect("recorded requests");
+    assert!(requests.iter().all(|r| r.url.path() != "/api/v1/jobs/41"));
+    let form = form_of(&posts(&mock).await[0]);
+    assert!(!form.contains_key("TEST:41"));
+    assert!(!form.contains_key("_START_AFTER:42"));
+}
+
+#[tokio::test]
+async fn clone_job_dry_run_posts_nothing_and_returns_the_settings() {
+    let mock = MockServer::start().await;
+    mount_clone_job(&mock, 7, json!({})).await;
+    mount_clone_create(&mock, json!({"7": 107})).await;
+    let client = clone_server(&mock).await;
+
+    let result = call(
+        &client,
+        "clone_job",
+        json!({"job_id": 7, "settings": ["FOO=bar"], "dry_run": true}),
+    )
+    .await
+    .expect("call_tool");
+
+    assert!(posts(&mock).await.is_empty());
+    let reply = text(&result);
+    assert_eq!(reply["dry_run"], json!(true));
+    assert_eq!(reply["jobs"]["7"]["FOO"], "bar");
+    assert_eq!(reply["jobs"]["7"]["TEST"], "t");
+    assert!(reply.get("ids").is_none());
+}
+
+#[tokio::test]
+async fn clone_job_redacted_secret_warns_and_still_clones() {
+    let mock = MockServer::start().await;
+    mount_clone_job(
+        &mock,
+        7,
+        json!({"settings": {"TEST": "t", "_SECRET": "[redacted]", "_OTHER": "[redacted]"}}),
+    )
+    .await;
+    mount_clone_create(&mock, json!({"7": 107})).await;
+    let client = clone_server(&mock).await;
+
+    let result = call(
+        &client,
+        "clone_job",
+        json!({"job_id": 7, "settings": ["_OTHER=mine"]}),
+    )
+    .await
+    .expect("call_tool");
+
+    assert_eq!(posts(&mock).await.len(), 1);
+    assert_eq!(
+        text(&result)["warnings"],
+        json!({"redacted": {"7": ["_SECRET"]}})
+    );
+}
+
+#[tokio::test]
+async fn clone_job_reports_missing_assets_unless_overridden() {
+    let mock = MockServer::start().await;
+    mount_clone_job(
+        &mock,
+        7,
+        json!({
+            "settings": {"TEST": "t", "HDD_1": "gone.qcow2"},
+            "missing_assets": ["hdd/gone.qcow2"]
+        }),
+    )
+    .await;
+    mount_clone_create(&mock, json!({"7": 107})).await;
+    let client = clone_server(&mock).await;
+
+    let result = call(&client, "clone_job", json!({"job_id": 7}))
+        .await
+        .expect("call_tool");
+    assert_eq!(
+        text(&result)["warnings"],
+        json!({"missing_assets": {"7": ["hdd/gone.qcow2"]}})
+    );
+
+    let result = call(
+        &client,
+        "clone_job",
+        json!({"job_id": 7, "settings": ["HDD_1=other.qcow2"]}),
+    )
+    .await
+    .expect("call_tool");
+    assert!(text(&result).get("warnings").is_none());
+}
+
+#[tokio::test]
+async fn clone_job_rejects_bad_settings_without_any_request() {
+    let mock = MockServer::start().await;
+    let client = clone_server(&mock).await;
+
+    let err = call(
+        &client,
+        "clone_job",
+        json!({"job_id": 7, "settings": ["lower=case"]}),
+    )
+    .await
+    .expect_err("invalid setting");
+    assert!(err.to_string().contains("settings[0]"), "{err}");
+
+    let many: Vec<String> = (0..101).map(|i| format!("K{i}=v")).collect();
+    let err = call(&client, "clone_job", json!({"job_id": 7, "settings": many}))
+        .await
+        .expect_err("too many settings");
+    assert!(err.to_string().contains("at most 100"), "{err}");
+
+    assert!(
+        mock.received_requests()
+            .await
+            .expect("recorded requests")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn clone_job_openqa_rejection_becomes_a_bad_request_tool_error() {
+    let mock = MockServer::start().await;
+    mount_clone_job(&mock, 7, json!({})).await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/jobs"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error": "no such machine"})))
+        .mount(&mock)
+        .await;
+    let client = clone_server(&mock).await;
+
+    let result = call(&client, "clone_job", json!({"job_id": 7}))
+        .await
+        .expect("call_tool");
+
+    assert_eq!(result.is_error, Some(true));
+    let error = &text(&result)["error"];
+    assert_eq!(error["kind"], "bad_request");
+    assert_eq!(error["status"], 400);
+    assert!(error["body"].as_str().unwrap().contains("no such machine"));
+}
+
+#[tokio::test]
+async fn clone_job_refuses_a_cluster_over_the_cap_before_posting() {
+    let mock = MockServer::start().await;
+    for id in 1..=50 {
+        mount_clone_job(&mock, id, json!({"children": {"Parallel": [id + 1]}})).await;
+    }
+    mount_clone_create(&mock, json!({})).await;
+    let client = clone_server(&mock).await;
+
+    let err = call(&client, "clone_job", json!({"job_id": 1, "max_depth": 0}))
+        .await
+        .expect_err("cluster too large");
+    assert!(err.to_string().contains("more than 50"), "{err}");
+
+    let requests = mock.received_requests().await.expect("recorded requests");
+    assert!(requests.iter().all(|r| r.method.as_str() != "POST"));
+    assert!(requests.iter().all(|r| r.url.path() != "/api/v1/jobs/51"));
+}

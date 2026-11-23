@@ -1,4 +1,4 @@
-//! Table-driven request-shape check for all 49 registered tools: method,
+//! Table-driven request-shape check for all 50 registered tools: method,
 //! path, query string, and body/form-encoding. `tests/tools.rs` asserts
 //! response handling and edge cases; this file asserts only where and how
 //! each tool's request goes out, so a typo'd `format!` path or a `GET` where
@@ -510,6 +510,8 @@ fn cases() -> Vec<Case> {
 /// of tier fetches, same problem.
 /// `get_step_needles` fetches `/details`, then a screenshot and needle image
 /// that only exist when `/details` names them.
+/// `clone_job` GETs every job in the cloned cluster, then POSTs once; the
+/// mock's `{}` job reply has no `job` object, so it never reaches the POST.
 /// `list_servers` sends no request at all (it just echoes the configured
 /// registry), so it has no place in a matrix whose whole purpose is request
 /// shape; excluded here rather than forcing `Case` to represent a no-request
@@ -518,6 +520,7 @@ const COVERED_OUTSIDE_MATRIX: &[&str] = &[
     "list_job_logs",
     "get_job_log_errors",
     "get_step_needles",
+    "clone_job",
     "list_servers",
 ];
 

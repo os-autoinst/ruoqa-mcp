@@ -281,7 +281,8 @@ argument.
 | `add_job_comment` | Add a comment to a job. |
 | `trigger_isos` | Trigger ISO test scheduling for a product. |
 | `delete_job` | Delete a job. |
-| `duplicate_job` | Duplicate (clone) a job. |
+| `duplicate_job` | Re-run a job via openQA's worker-oriented duplicate route (like a restart, but running jobs aren't aborted and assets aren't checked). Takes no setting overrides; use `clone_job` for that. |
+| `clone_job` | Create new jobs from an existing job and its dependencies with changed settings (like `openqa-clone-job --within-instance`). |
 | `set_job_priority` | Set the priority of a job. |
 | `cancel_jobs` | Cancel jobs matching the given filters; at least one filter is required. |
 | `add_group_comment` | Add a comment to a job group. |
@@ -308,6 +309,33 @@ one id missing its assets) is reported by openQA itself in the response's
 row); individual values stay unbounded to allow an inline
 `SCENARIO_DEFINITIONS_YAML` document. `extra` keys may not collide,
 case-insensitively, with `distri`/`version`/`flavor`/`arch` or with each other.
+
+`clone_job` is `openqa-clone-job --within-instance` as a tool: it fetches the job
+(with `unredacted=1&check_assets=1`) and its dependency cluster from the same
+server and creates the copies with one `POST jobs`. It needs operator
+credentials, so it is unavailable to a read-scope HTTP token even with
+`dry_run`.
+
+- `settings` is an ordered list of strings: `KEY=VALUE` sets, `KEY+=VALUE`
+  appends, `KEY=` deletes, `KEY:TEST=VALUE` applies only to the job whose
+  `TEST` is exactly that. `KEY` matches `[A-Z0-9_]+`. An entry that does not
+  parse is rejected before any request (upstream only warns). Parents get only
+  `WORKER_CLASS`, `_GROUP` and `_GROUP_ID` unless `parental_inheritance` is set;
+  `_GROUP` and `_GROUP_ID` override each other. At most 100 entries.
+- Dependencies follow upstream: parents are cloned unless `skip_deps`
+  (`skip_chained_deps` keeps only parallel parents); parallel children are
+  cloned up to `max_depth` (default 1, `0` = unlimited), chained children only
+  with `clone_children`. One call creates at most 50 jobs; a larger cluster is
+  refused with no request sent. Cloning a parallel client therefore clones its
+  server but not the server's other clients, as upstream does.
+- Pass `_GROUP=0` so clones stay off production dashboards, and use `dry_run`
+  to get the final settings per original job id (`{"dry_run": true, "jobs": {...}}`)
+  without creating anything.
+- The reply is openQA's `ids` (original → new) plus `urls`, and optional
+  `warnings`: `redacted` lists settings that still hold `[redacted]` (the
+  credential cannot read secrets; they clone as `[redacted]`), and
+  `missing_assets` lists assets the clones still reference that no longer exist
+  and no cloned job publishes. Warnings never block the clone.
 
 The reservation tools need an operator account. `reserve_worker` and
 `release_worker` take `worker` as a numeric id or `host:instance`; a host
@@ -399,7 +427,7 @@ authentication is mandatory and deny-by-default. Two tokens define two scopes:
 
 | Token | Scope | Tools |
 | --- | --- | --- |
-| `OPENQA_MCP_HTTP_TOKEN` | write | all 49 read + mutating tools |
+| `OPENQA_MCP_HTTP_TOKEN` | write | all 50 read + mutating tools |
 | `OPENQA_MCP_HTTP_READ_TOKEN` | read | the 31 read tools only |
 
 Either may be set alone. A read-scope caller sees only the read tools in

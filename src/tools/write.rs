@@ -1,4 +1,4 @@
-//! The 18 mutating tools (port of the MUTATING section of `server.py`).
+//! The 19 mutating tools (port of the MUTATING section of `server.py`).
 //! `data=` in Python maps to `Client::request_form` (form-encoded, not JSON);
 //! `params=` maps to a query string + `Client::request` with no body.
 
@@ -12,11 +12,16 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, tool, tool_router};
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::{Map, Value, json};
 
+use crate::error::{classify, tool_error};
 use crate::form::Form;
 use crate::query::{Query, api};
-use crate::server::{OpenQaServer, to_result};
-use crate::tools::{MAX_EXTRA_ENTRIES, MAX_RESTART_JOBS, bounded};
+use crate::server::{OpenQaServer, ok, to_result};
+use crate::tools::clone::{self, CloneOptions, Job, PlanError, SettingArg, compose_form};
+use crate::tools::{
+    MAX_CLONE_JOBS, MAX_CLONE_SETTINGS, MAX_EXTRA_ENTRIES, MAX_RESTART_JOBS, bounded,
+};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RestartJobs {
@@ -75,6 +80,44 @@ pub struct DuplicateJob {
     pub prio: Option<i64>,
     #[serde(default)]
     pub dup_type_auto: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CloneJob {
+    /// Which configured openQA server to query. Call `list_servers` to
+    /// discover valid values (including aliases like `osd`/`o3`).
+    pub server: String,
+    /// The job to clone.
+    pub job_id: i64,
+    /// Overrides applied to the clones, in order, as `KEY=VALUE` strings:
+    /// `KEY=VALUE` sets, `KEY+=VALUE` appends, `KEY=` deletes,
+    /// `KEY:TEST=VALUE` applies only to the job whose TEST is exactly that.
+    /// KEY is `[A-Z0-9_]+`, e.g. `["_GROUP=0", "TEST+=-pr", "CASEDIR=https://github.com/me/repo.git#branch"]`.
+    /// Dependencies (parents) only receive `WORKER_CLASS`, `_GROUP` and
+    /// `_GROUP_ID` unless `parental_inheritance` is set.
+    #[serde(default)]
+    #[schemars(length(max = MAX_CLONE_SETTINGS))]
+    pub settings: Option<Vec<String>>,
+    /// Do not clone any parents (default false).
+    #[serde(default)]
+    pub skip_deps: Option<bool>,
+    /// Do not clone chained and directly chained parents, keep parallel ones
+    /// (default false).
+    #[serde(default)]
+    pub skip_chained_deps: Option<bool>,
+    /// Also clone chained and directly chained children (default false;
+    /// parallel children are cloned up to `max_depth`).
+    #[serde(default)]
+    pub clone_children: Option<bool>,
+    /// How deep children are followed (default 1, 0 = unlimited).
+    #[serde(default)]
+    pub max_depth: Option<u32>,
+    /// Apply every setting to cloned parents too (default false).
+    #[serde(default)]
+    pub parental_inheritance: Option<bool>,
+    /// Return the settings the clones would be created with, create nothing.
+    #[serde(default)]
+    pub dry_run: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -453,6 +496,124 @@ openQA reports it in the response itself (a `result` map of restarted ids and an
     }
 
     #[tool(
+        description = "Create new jobs from an existing job with changed settings (like \
+openqa-clone-job --within-instance), e.g. to verify a test-code fix. Copies the job and its \
+dependency cluster: parents (see skip_deps, skip_chained_deps), parallel children, and with \
+clone_children chained children (see max_depth); at most 50 jobs. Pass `_GROUP=0` in \
+settings so clones stay off production dashboards, and skip_chained_deps to avoid re-running \
+install jobs. Use dry_run first to see the exact settings. Differs from duplicate_job and restart_jobs, which take no overrides. \
+Needs operator credentials; secrets the credential cannot read stay `[redacted]` and are \
+listed under warnings.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false
+        )
+    )]
+    async fn clone_job(
+        &self,
+        Parameters(args): Parameters<CloneJob>,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let client = self.resolve_server(&args.server)?;
+        let raw = args.settings.unwrap_or_default();
+        bounded("settings", raw.len(), 0, MAX_CLONE_SETTINGS)?;
+        let parsed = raw
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                SettingArg::parse(entry)
+                    .map_err(|e| ErrorData::invalid_params(format!("settings[{i}]: {e}"), None))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let opts = CloneOptions {
+            skip_deps: args.skip_deps.unwrap_or(false),
+            skip_chained_deps: args.skip_chained_deps.unwrap_or(false),
+            clone_children: args.clone_children.unwrap_or(false),
+            max_depth: args.max_depth.unwrap_or(1),
+            parental_inheritance: args.parental_inheritance.unwrap_or(false),
+        };
+        let base = client.base_url().as_str().trim_end_matches('/').to_string();
+
+        let mut cache = HashMap::new();
+        let plan = loop {
+            match clone::plan(args.job_id, opts, &parsed, &cache, &base) {
+                Ok(plan) => break plan,
+                Err(PlanError::TooManyJobs) => {
+                    return Err(ErrorData::invalid_params(
+                        format!(
+                            "cloning job {} would create more than {MAX_CLONE_JOBS} jobs; \
+                             narrow it with skip_deps, skip_chained_deps, clone_children=false \
+                             or a smaller max_depth",
+                            args.job_id
+                        ),
+                        None,
+                    ));
+                }
+                Err(PlanError::Need(id)) => {
+                    let path = Query::new()
+                        .push("unredacted", Some(1))
+                        .push("check_assets", Some(1))
+                        .finish(&api(&format!("jobs/{id}")));
+                    let fetched = match self.request_json(&ctx, client, Method::GET, &path).await {
+                        Ok(value) => value,
+                        Err(e) => return classify(e),
+                    };
+                    match Job::from_json(&fetched) {
+                        Ok(job) => cache.insert(id, job),
+                        Err(why) => {
+                            return tool_error(
+                                "invalid_response",
+                                None,
+                                format!("job {id}: {why}"),
+                                None,
+                            );
+                        }
+                    };
+                }
+            }
+        };
+
+        let mut reply = Map::new();
+        if args.dry_run.unwrap_or(false) {
+            reply.insert("dry_run".into(), json!(true));
+            reply.insert("jobs".into(), json!(plan.settings));
+        } else {
+            let created = match self
+                .request_form(
+                    &ctx,
+                    client,
+                    Method::POST,
+                    &api("jobs"),
+                    &compose_form(&plan),
+                )
+                .await
+            {
+                Ok(value) => value,
+                Err(e) => return classify(e),
+            };
+            let ids = created.get("ids").and_then(Value::as_object);
+            let urls: Map<String, Value> = ids
+                .into_iter()
+                .flatten()
+                .filter_map(|(orig, new)| {
+                    Some((
+                        orig.clone(),
+                        json!(format!("{base}/tests/{}", new.as_i64()?)),
+                    ))
+                })
+                .collect();
+            reply.insert("ids".into(), ids.map_or(Value::Null, |m| json!(m)));
+            reply.insert("urls".into(), Value::Object(urls));
+        }
+        if let Some(warnings) = clone::warnings(&plan, &cache) {
+            reply.insert("warnings".into(), warnings);
+        }
+        ok(Value::Object(reply))
+    }
+
+    #[tool(
         description = "Delete a job.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
@@ -474,7 +635,9 @@ openQA reports it in the response itself (a `result` map of restarted ids and an
     }
 
     #[tool(
-        description = "Duplicate (clone) a job.",
+        description = "Re-run a job via openQA's worker-oriented duplicate route (like a \
+restart, but running jobs aren't aborted and assets aren't checked). Takes no setting \
+overrides; use clone_job to copy a job with changed settings.",
         annotations(read_only_hint = false, destructive_hint = true)
     )]
     async fn duplicate_job(
