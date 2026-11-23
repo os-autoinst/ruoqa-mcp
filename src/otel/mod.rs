@@ -335,6 +335,7 @@ async fn probe_logs(
         &signal.headers.to_header_map(),
         signal.timeout,
         body,
+        None,
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))
@@ -375,6 +376,7 @@ async fn probe_traces(
         &signal.headers.to_header_map(),
         signal.timeout,
         body,
+        None,
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))
@@ -429,6 +431,7 @@ async fn probe_metrics(
         &signal.headers.to_header_map(),
         signal.timeout,
         body,
+        None,
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))
