@@ -331,7 +331,10 @@ credentials, so it is unavailable to a read-scope HTTP token even with
   server but not the server's other clients, as upstream does.
 - Pass `_GROUP=0` so clones stay off production dashboards, and use `dry_run`
   to get the final settings per original job id (`{"dry_run": true, "jobs": {...}}`)
-  without creating anything.
+  without creating anything. Secret values (keys matching `^_SECRET_` or
+  `_PASSWORD`, or the job's `_HIDE_SECRETS_REGEX`) show as `[redacted]` there,
+  as openQA shows them to a non-operator; only the `redacted` warning says
+  which ones will really clone as `[redacted]`.
 - The reply is openQA's `ids` (original → new) plus `urls`, and optional
   `warnings`: `redacted` lists settings that still hold `[redacted]` (the
   credential cannot read secrets; they clone as `[redacted]`), and

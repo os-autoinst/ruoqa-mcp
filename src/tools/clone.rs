@@ -394,6 +394,43 @@ pub(crate) fn warnings(plan: &Plan, cache: &HashMap<i64, Job>) -> Option<Value> 
     (!out.is_empty()).then_some(Value::Object(out))
 }
 
+/// Upstream's `redact_settings` default: the keys a job read without
+/// `unredacted=1` shows as `[redacted]`.
+static SECRET_KEY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new("^_SECRET_|_PASSWORD").expect("static pattern"));
+
+/// The planned settings with secret values replaced by `[redacted]`, as
+/// openQA itself shows them without `unredacted=1`, so a dry run never hands
+/// out what the operator credential fetched. The original job's
+/// `_HIDE_SECRETS_REGEX` counts (an override cannot unhide a value); one this
+/// regex engine cannot compile hides every value of that job.
+pub(crate) fn redacted_settings(plan: &Plan, cache: &HashMap<i64, Job>) -> BTreeMap<i64, Settings> {
+    plan.settings
+        .iter()
+        .map(|(id, settings)| {
+            let custom = cache
+                .get(id)
+                .and_then(|job| job.settings.get("_HIDE_SECRETS_REGEX"))
+                .filter(|re| !re.is_empty())
+                .map(|re| Regex::new(re).ok());
+            let hidden = |key: &str| {
+                SECRET_KEY.is_match(key)
+                    || custom
+                        .as_ref()
+                        .is_some_and(|re| re.as_ref().is_none_or(|re| re.is_match(key)))
+            };
+            let settings = settings
+                .iter()
+                .map(|(k, v)| {
+                    let v = if hidden(k) { "[redacted]" } else { v.as_str() };
+                    (k.clone(), v.to_string())
+                })
+                .collect();
+            (*id, settings)
+        })
+        .collect()
+}
+
 /// Where a `github_ref` clone points the job's test code.
 pub(crate) struct Refspec<'a> {
     /// `<owner>/<repo>` of the fork the branch lives in.
@@ -932,6 +969,45 @@ mod tests {
         let p = run(42, o, &["_SECRET_B=mine"], &cache);
         let w = warnings(&p, &cache).unwrap();
         assert_eq!(w, json!({"redacted": {"42": ["_SECRET_A"]}}));
+    }
+
+    #[test]
+    fn dry_run_settings_hide_what_openqa_redacts() {
+        let mut cache = cluster();
+        cache.get_mut(&42).unwrap().settings.extend(settings(&[
+            ("_SECRET_A", "s3cret"),
+            ("SCC_PASSWORD_X", "hunter2"),
+            ("PASSWORD", "shown"),
+            ("API_TOKEN", "tok"),
+            ("_HIDE_SECRETS_REGEX", "TOKEN"),
+        ]));
+        cache
+            .get_mut(&41)
+            .unwrap()
+            .settings
+            .extend(settings(&[("API_TOKEN", "shown")]));
+        let p = run(42, opts(), &["_HIDE_SECRETS_REGEX="], &cache);
+        let shown = redacted_settings(&p, &cache);
+        assert_eq!(shown[&42]["_SECRET_A"], "[redacted]");
+        assert_eq!(shown[&42]["SCC_PASSWORD_X"], "[redacted]");
+        assert_eq!(shown[&42]["API_TOKEN"], "[redacted]");
+        assert_eq!(shown[&42]["PASSWORD"], "shown");
+        assert_eq!(shown[&42]["TEST"], "main");
+        assert_eq!(shown[&41]["API_TOKEN"], "shown");
+        assert_eq!(p.settings[&42]["_SECRET_A"], "s3cret");
+    }
+
+    #[test]
+    fn uncompilable_hide_regex_hides_every_value_of_the_job() {
+        let mut cache = cluster();
+        cache.get_mut(&42).unwrap().settings.extend(settings(&[
+            ("_HIDE_SECRETS_REGEX", "(?<=X)TOKEN"),
+            ("API_TOKEN", "tok"),
+        ]));
+        let p = run(42, opts(), &[], &cache);
+        let shown = redacted_settings(&p, &cache);
+        assert!(shown[&42].values().all(|v| v == "[redacted]"));
+        assert_eq!(shown[&41]["TEST"], "parent");
     }
 
     #[test]

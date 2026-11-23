@@ -2595,6 +2595,39 @@ async fn clone_job_dry_run_posts_nothing_and_returns_the_settings() {
 }
 
 #[tokio::test]
+async fn clone_job_dry_run_hides_secret_values_but_clones_them() {
+    let mock = MockServer::start().await;
+    mount_clone_job(
+        &mock,
+        7,
+        json!({"settings": {"TEST": "t", "_SECRET_KEY": "s3cret", "VNC_PASSWORD": "hunter2"}}),
+    )
+    .await;
+    mount_clone_create(&mock, json!({"7": 107})).await;
+    let client = clone_server(&mock, None).await;
+
+    let result = call(&client, "clone_job", json!({"job_id": 7, "dry_run": true}))
+        .await
+        .expect("call_tool");
+    let reply = text(&result);
+    let body = reply.to_string();
+    assert!(
+        !body.contains("s3cret") && !body.contains("hunter2"),
+        "{body}"
+    );
+    assert_eq!(reply["jobs"]["7"]["_SECRET_KEY"], "[redacted]");
+    assert_eq!(reply["jobs"]["7"]["VNC_PASSWORD"], "[redacted]");
+    assert!(reply.get("warnings").is_none());
+
+    call(&client, "clone_job", json!({"job_id": 7}))
+        .await
+        .expect("call_tool");
+    let form = form_of(&posts(&mock).await[0]);
+    assert_eq!(form["_SECRET_KEY:7"], "s3cret");
+    assert_eq!(form["VNC_PASSWORD:7"], "hunter2");
+}
+
+#[tokio::test]
 async fn clone_job_redacted_secret_warns_and_still_clones() {
     let mock = MockServer::start().await;
     mount_clone_job(

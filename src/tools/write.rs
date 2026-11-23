@@ -125,6 +125,7 @@ pub struct CloneJob {
     #[serde(default)]
     pub parental_inheritance: Option<bool>,
     /// Return the settings the clones would be created with, create nothing.
+    /// Secret values are shown as `[redacted]`.
     #[serde(default)]
     pub dry_run: Option<bool>,
     /// Create the clones even when they reference assets that no longer
@@ -642,7 +643,10 @@ warnings.",
         let mut reply = Map::new();
         if dry_run {
             reply.insert("dry_run".into(), json!(true));
-            reply.insert("jobs".into(), json!(plan.settings));
+            reply.insert(
+                "jobs".into(),
+                json!(clone::redacted_settings(&plan, &cache)),
+            );
         } else {
             let created = match self
                 .request_form(
