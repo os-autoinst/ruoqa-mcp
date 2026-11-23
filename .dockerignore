@@ -1,6 +1,4 @@
-target
-.git
-plans
-.wt
-.github
-docs
+*
+!Cargo.toml
+!Cargo.lock
+!src/
