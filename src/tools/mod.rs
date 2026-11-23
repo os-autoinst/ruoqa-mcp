@@ -72,6 +72,9 @@ pub(crate) const DIGEST_MAX_MODULES: usize = 10;
 /// `get_job_log_errors`: cap on how many `--- # stack trace` frames
 /// `died_context` reports.
 pub(crate) const DIGEST_MAX_STACK_FRAMES: usize = 10;
+/// `get_job_log_errors`: how far past a die line `died_context` looks for
+/// `--- # stack trace` in a log without timestamps to mark the entry's end.
+pub(crate) const DIGEST_STACK_SEARCH_LINES: usize = 50;
 
 /// Reject `len` outside `[min, max]` with a message naming `field`, the
 /// observed count, and the limit that was crossed.

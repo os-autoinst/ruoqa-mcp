@@ -29,7 +29,8 @@ use serde_json::Value;
 use crate::error::{classify, status_kind, tool_error};
 use crate::heartbeat::with_heartbeat;
 use crate::tools::{
-    DIGEST_MAX_LINE_CHARS, DIGEST_MAX_MODULES, DIGEST_MAX_STACK_FRAMES, PROBE_BYTES,
+    DIGEST_MAX_LINE_CHARS, DIGEST_MAX_MODULES, DIGEST_MAX_STACK_FRAMES, DIGEST_STACK_SEARCH_LINES,
+    PROBE_BYTES,
 };
 
 /// Bytes assumed per log line when sizing a tail read. Generous relative to
@@ -1011,13 +1012,18 @@ pub(crate) fn died_context(text: &str, hit_line: usize) -> Option<DiedContext> {
         .find(|l| l.contains("[step:"))
         .map(|l| truncate_line(l, DIGEST_MAX_LINE_CHARS));
 
-    let stack: Vec<String> = lines[hit_idx..]
+    let entry: Vec<&str> = lines[hit_idx + 1..]
+        .iter()
+        .take_while(|l| !TIMESTAMPED_LOG_LINE.is_match(l))
+        .take(DIGEST_STACK_SEARCH_LINES)
+        .copied()
+        .collect();
+    let stack: Vec<String> = entry
         .iter()
         .position(|l| l.contains("--- # stack trace"))
         .map(|offset| {
-            lines[hit_idx + offset + 1..]
+            entry[offset + 1..]
                 .iter()
-                .take_while(|l| !TIMESTAMPED_LOG_LINE.is_match(l))
                 .take(DIGEST_MAX_STACK_FRAMES)
                 .map(|l| (*l).to_string())
                 .collect()
@@ -1756,6 +1762,19 @@ mod tests {
                 .iter()
                 .all(|l| !l.contains("some other debug line"))
         );
+    }
+
+    #[test]
+    fn died_context_ignores_a_stack_trace_from_a_later_entry() {
+        let text = "[2026-09-24T10:00:00.000000+02:00] [info] [pid:1] Result: timeout\n\
+             [2026-09-24T10:00:01.000000+02:00] [info] [pid:1] later entry\n\
+             --- # stack trace\n  main::run(...) called at x.pm line 1\n";
+        assert!(died_context(text, 1).is_none());
+
+        let with_step = format!("[step:a,b,1] x.pm:1 called\n{text}");
+        let context = died_context(&with_step, 2).unwrap();
+        assert!(context.step.is_some());
+        assert_eq!(context.stack, Vec::<String>::new());
     }
 
     #[test]
