@@ -1076,21 +1076,32 @@ mod tests {
 
     #[test]
     fn capture_args_multibyte_head_is_char_safe() {
-        let args = json!({"text": "é".repeat(600)});
+        // The odd-length prefix puts byte 1024 inside a 2-byte character.
+        let text = format!("a{}", "é".repeat(600));
+        let args = json!({"text": text});
         let captured = capture_args(args.as_object()).unwrap();
-        assert_eq!(captured["text"]["_len"], 1200);
+        assert_eq!(captured["text"]["_len"], 1201);
         let head = captured["text"]["_head"].as_str().unwrap();
-        assert_eq!(head, "é".repeat(512));
-        assert!(head.len() <= ARGS_MAX_STRING);
+        assert_eq!(head, format!("a{}", "é".repeat(511)));
+        assert_eq!(head.len(), ARGS_MAX_STRING - 1);
     }
 
     #[test]
     fn capture_args_oversized_allowlisted_object_is_summarized() {
         let big = "y".repeat(5 * 1024);
-        let args = json!({"text": {"a": big}, "job_ids": [big]});
+        let args = json!({"text": {"a": big}});
         let captured = capture_args(args.as_object()).unwrap();
         assert_eq!(captured["text"], json!({"_len": 1}));
-        assert_eq!(captured["job_ids"], json!({"_len": 1}));
+    }
+
+    #[test]
+    fn capture_args_oversized_allowlisted_array_is_summarized() {
+        let chunk = "y".repeat(2 * 1024);
+        let items = vec![chunk; 3];
+        assert!(items.len() <= ARGS_MAX_ARRAY);
+        let args = json!({"member": items});
+        let captured = capture_args(args.as_object()).unwrap();
+        assert_eq!(captured["member"], json!({"_len": 3}));
     }
 
     #[test]
