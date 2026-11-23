@@ -2380,6 +2380,101 @@ async fn get_step_needles_oversized_screenshot_is_response_too_large() {
     assert_eq!(text(&result)["error"]["kind"], "response_too_large");
 }
 
+/// Mounts a `/details` for job `id` with one failed `boot` step (num 2)
+/// carrying `count` candidates `n00`, `n01`, ... in descending score.
+async fn mount_many_needles(mock: &MockServer, id: i64, count: usize) {
+    let needles: Vec<_> = (0..count)
+        .map(|i| {
+            json!({
+                "name": format!("n{i:02}"),
+                "area": [{"similarity": f64::from(90 - u32::try_from(i).unwrap()) / 100.0}],
+            })
+        })
+        .collect();
+    Mock::given(method("GET"))
+        .and(path(format!("/api/v1/jobs/{id}/details")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"job": {
+            "settings": {"DISTRI": "sle"},
+            "testresults": [{"name": "boot", "details": [
+                {"num": 2, "result": "fail", "screenshot": "boot-2.png", "needles": needles}
+            ]}]
+        }})))
+        .mount(mock)
+        .await;
+}
+
+#[tokio::test]
+async fn get_step_needles_skips_needles_over_the_result_budget() {
+    const MIB: usize = 1024 * 1024;
+    for (id, image_len, expected) in [
+        (70, 2 * MIB, vec!["screenshot", "needle:n00"]),
+        (71, 4 * MIB - 16, vec!["screenshot"]),
+    ] {
+        let mock = MockServer::start().await;
+        mount_many_needles(&mock, id, 3).await;
+        mount_png(
+            &mock,
+            &format!("/tests/{id}/images/boot-2.png"),
+            png(&vec![0u8; image_len]),
+        )
+        .await;
+        for name in ["n00", "n01", "n02"] {
+            mount_png(
+                &mock,
+                &format!("/needles/sle/{name}.png"),
+                png(&vec![0u8; image_len]),
+            )
+            .await;
+        }
+        let client = server_with_mock(&mock, true).await;
+
+        let result = call(
+            &client,
+            "get_step_needles",
+            json!({"job_id": id, "module": "boot", "step": 2, "max_candidates": 3}),
+        )
+        .await
+        .expect("call_tool");
+
+        assert_ne!(result.is_error, Some(true));
+        assert!(serde_json::to_vec(&result).unwrap().len() <= 8 * MIB);
+        let summary = text(&result);
+        assert_eq!(summary["images"], json!(expected));
+        assert_eq!(image_blocks(&result).len(), expected.len());
+        for candidate in &summary["needles"].as_array().unwrap()[expected.len() - 1..] {
+            assert!(
+                candidate["image_error"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("skipped:")),
+                "{summary}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn get_step_needles_caps_the_candidate_list() {
+    let mock = MockServer::start().await;
+    mount_many_needles(&mock, 72, 25).await;
+    mount_png(&mock, "/tests/72/images/boot-2.png", png(b"shot")).await;
+    mount_png(&mock, "/needles/sle/n00.png", png(b"best")).await;
+    let client = server_with_mock(&mock, true).await;
+
+    let result = call(
+        &client,
+        "get_step_needles",
+        json!({"job_id": 72, "module": "boot", "step": 2}),
+    )
+    .await
+    .expect("call_tool");
+
+    assert_ne!(result.is_error, Some(true));
+    let summary = text(&result);
+    assert_eq!(summary["needles"].as_array().unwrap().len(), 20);
+    assert_eq!(summary["needle_count"], 25);
+    assert_eq!(summary["needles"][0]["name"], "n00");
+}
+
 #[tokio::test]
 async fn get_step_needles_unknown_module_or_step_is_not_found() {
     let mock = MockServer::start().await;
