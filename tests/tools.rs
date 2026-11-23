@@ -1975,6 +1975,47 @@ async fn get_job_log_errors_no_marker_tier_matches_falls_back_to_tail() {
     assert_eq!(hits[29]["line"], 50);
 }
 
+async fn assert_markers_fall_back_to_tail(markers: serde_json::Value) {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/jobs/25/details"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "job": {"logs": ["autoinst-log.txt"], "testresults": []}
+        })))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/tests/25/file/autoinst-log.txt"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(numbered_lines(50)))
+        .mount(&mock)
+        .await;
+    let client = server_with_mock(&mock, true).await;
+
+    let result = call(
+        &client,
+        "get_job_log_errors",
+        json!({"job_id": 25, "markers": markers}),
+    )
+    .await
+    .expect("call_tool");
+    let value = text(&result);
+
+    assert_eq!(value["tier"], "tail");
+    assert_eq!(value["source"], "autoinst-log.txt");
+    assert_eq!(value["hit_count"], 0);
+    assert_eq!(value["hits"].as_array().unwrap().len(), 30);
+}
+
+#[tokio::test]
+async fn get_job_log_errors_empty_markers_fall_back_to_tail() {
+    assert_markers_fall_back_to_tail(json!([])).await;
+}
+
+#[tokio::test]
+async fn get_job_log_errors_unmatched_markers_fall_back_to_tail() {
+    assert_markers_fall_back_to_tail(json!(["NOPE"])).await;
+}
+
 #[tokio::test]
 async fn get_job_log_errors_markers_replace_the_tier_chain() {
     let mock = MockServer::start().await;

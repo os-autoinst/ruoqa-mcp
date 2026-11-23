@@ -1213,6 +1213,16 @@ the log carries them.",
                 Err(bail) => return bail,
             };
             let scan = artifact::scan_markers(&text, set, DIGEST_CONTEXT_LINES, DIGEST_MAX_HITS);
+            if scan.hit_count == 0 {
+                return digest_reply(
+                    job_id,
+                    "tail",
+                    &scan_file,
+                    &tail_scan(&text),
+                    failed_modules,
+                    None,
+                );
+            }
             return digest_reply(
                 job_id,
                 "custom",
@@ -1308,13 +1318,14 @@ the log carries them.",
             );
         }
 
-        let scan = artifact::ScanResult {
-            hits: artifact::tail_hits(&text, DIGEST_TAIL_LINES),
-            hit_count: 0,
-            more_hits: false,
-            total_lines: text.lines().count(),
-        };
-        digest_reply(job_id, "tail", &scan_file, &scan, failed_modules, None)
+        digest_reply(
+            job_id,
+            "tail",
+            &scan_file,
+            &tail_scan(&text),
+            failed_modules,
+            None,
+        )
     }
 
     #[tool(
@@ -1450,6 +1461,16 @@ fn with_tail(mut scan: artifact::ScanResult, text: &str) -> artifact::ScanResult
             .extend(artifact::tail_hits(text, DIGEST_TAIL_LINES));
     }
     scan
+}
+
+/// The `tail` tier: the last `DIGEST_TAIL_LINES` lines, no marker hits.
+fn tail_scan(text: &str) -> artifact::ScanResult {
+    artifact::ScanResult {
+        hits: artifact::tail_hits(text, DIGEST_TAIL_LINES),
+        hit_count: 0,
+        more_hits: false,
+        total_lines: text.lines().count(),
+    }
 }
 
 /// Builds `get_job_log_errors`'s reply; `failed_modules` is omitted when the
