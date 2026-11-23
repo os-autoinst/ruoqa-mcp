@@ -150,6 +150,7 @@ fn histogram_attr(point: &Message, key: &str) -> Option<String> {
 async fn otlp_metrics_signal_end_to_end() {
     tool_call_produces_matching_calls_and_duration_points().await;
     failing_call_adds_a_second_calls_series_with_error_kind().await;
+    unknown_tool_names_share_one_calls_series().await;
     cumulative_series_rises_and_start_time_is_stable().await;
     idle_interval_produces_no_metrics_request().await;
     metrics_exporter_none_leaves_logs_working().await;
@@ -295,6 +296,81 @@ async fn failing_call_adds_a_second_calls_series_with_error_kind() {
     assert_eq!(
         number_attr(point, "error.kind").as_deref(),
         Some("not_found")
+    );
+
+    unsafe {
+        std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
+        std::env::remove_var("OTEL_TRACES_EXPORTER");
+    }
+}
+
+/// Distinct client-chosen tool names that no router entry backs must not
+/// each mint a series: they all land in one `tool=unknown` point.
+#[allow(
+    unsafe_code,
+    reason = "edition 2024 requires unsafe for std::env::set_var"
+)]
+async fn unknown_tool_names_share_one_calls_series() {
+    let openqa = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 1})))
+        .mount(&openqa)
+        .await;
+    let collector = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&collector)
+        .await;
+
+    unsafe {
+        std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", collector.uri());
+        std::env::set_var("OTEL_TRACES_EXPORTER", "none");
+    }
+
+    let telemetry = Telemetry::init()
+        .await
+        .expect("probe succeeds")
+        .expect("OTEL_EXPORTER_OTLP_ENDPOINT is set");
+    let client = run_server(&openqa, &telemetry).await;
+
+    for i in 0..5 {
+        call(&client, &format!("bogus_{i}"), json!({}))
+            .await
+            .expect_err("an unknown tool is a protocol error");
+    }
+    call(&client, "get_job", json!({"job_id": 1}))
+        .await
+        .expect("call_tool");
+
+    telemetry.shutdown().await;
+
+    let requests = requests_to(&collector, "/v1/metrics").await;
+    assert_eq!(requests.len(), 2);
+    let metrics = decode_metrics(&requests[1].body);
+    let calls = metric_by_name(&metrics, "ruoqa.tool.calls").expect("calls metric exported");
+    let points = sum_points(calls);
+    let tools: Vec<String> = points
+        .iter()
+        .filter_map(|p| number_attr(p, "tool"))
+        .collect();
+    assert!(
+        tools.iter().all(|t| !t.starts_with("bogus_")),
+        "raw unknown names leaked into the series: {tools:?}"
+    );
+    let unknown: Vec<_> = points
+        .iter()
+        .filter(|p| number_attr(p, "tool").as_deref() == Some("unknown"))
+        .collect();
+    assert_eq!(unknown.len(), 1, "one folded series: {tools:?}");
+    assert_eq!(unknown[0].u64(6), Some(5));
+    assert!(tools.iter().any(|t| t == "get_job"));
+
+    let duration =
+        metric_by_name(&metrics, "ruoqa.tool.duration").expect("duration metric exported");
+    assert!(
+        histogram_points(duration)
+            .iter()
+            .all(|p| !histogram_attr(p, "tool").is_some_and(|t| t.starts_with("bogus_")))
     );
 
     unsafe {
