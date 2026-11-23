@@ -18,7 +18,7 @@ pub(crate) const MAX_CLONE_SETTINGS: usize = 100;
 /// `clone_job`: jobs in one dependency cluster, each fetched with one GET.
 pub(crate) const MAX_CLONE_JOBS: usize = 50;
 
-/// Largest serialized tool result `server::ok` will send. Stays under the
+/// Largest serialized tool result the server will send. Stays under the
 /// 10 MiB stdio buffer some clients (`OpenCode`) enforce, where a bigger
 /// message drops the connection instead of failing the call.
 pub(crate) const MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
