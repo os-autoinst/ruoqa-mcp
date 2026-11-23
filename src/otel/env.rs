@@ -26,8 +26,9 @@ use url::Url;
 
 const DEFAULT_SERVICE_NAME: &str = "ruoqa-mcp";
 const DEFAULT_TIMEOUT_MS: u64 = 10_000;
-const DEFAULT_MAX_QUEUE_SIZE: usize = 2048;
-const DEFAULT_MAX_EXPORT_BATCH_SIZE: usize = 512;
+const DEFAULT_MAX_QUEUE_SIZE: u64 = 2048;
+const DEFAULT_MAX_EXPORT_BATCH_SIZE: u64 = 512;
+const MAX_QUEUE_SIZE_LIMIT: u64 = 1_000_000;
 const DEFAULT_SCHEDULE_DELAY_MS: u64 = 5000;
 const DEFAULT_METRIC_EXPORT_INTERVAL_MS: u64 = 60_000;
 
@@ -192,6 +193,12 @@ pub(crate) enum EnvError {
         var: String,
         value: String,
     },
+    OutOfRange {
+        var: String,
+        value: u64,
+        min: u64,
+        max: Option<u64>,
+    },
 }
 
 impl EnvError {
@@ -242,6 +249,21 @@ impl fmt::Display for EnvError {
             EnvError::InvalidNumber { var, value } => {
                 write!(f, "{var} is set to {value:?}, which is not a valid number")
             }
+            EnvError::OutOfRange {
+                var,
+                value,
+                min,
+                max: None,
+            } => write!(f, "{var} is set to {value}, but must be at least {min}"),
+            EnvError::OutOfRange {
+                var,
+                value,
+                min,
+                max: Some(max),
+            } => write!(
+                f,
+                "{var} is set to {value}, but must be between {min} and {max}"
+            ),
         }
     }
 }
@@ -353,20 +375,38 @@ fn parse_millis(get: Lookup<'_>, var: &str, default: u64) -> Result<u64, EnvErro
     }
 }
 
+fn parse_bounded(
+    get: Lookup<'_>,
+    var: &str,
+    default: u64,
+    min: u64,
+    max: Option<u64>,
+) -> Result<u64, EnvError> {
+    let value = parse_millis(get, var, default)?;
+    if value < min || max.is_some_and(|max| value > max) {
+        return Err(EnvError::OutOfRange {
+            var: var.to_string(),
+            value,
+            min,
+            max,
+        });
+    }
+    Ok(value)
+}
+
 fn resolve_timeout(get: Lookup<'_>, signal: Signal) -> Result<Duration, EnvError> {
     let signal_var = var_name(Some(signal), "_TIMEOUT");
-    if lookup(get, &signal_var).is_some() {
-        return Ok(Duration::from_millis(parse_millis(
-            get,
-            &signal_var,
-            DEFAULT_TIMEOUT_MS,
-        )?));
-    }
-    let base_var = var_name(None, "_TIMEOUT");
-    Ok(Duration::from_millis(parse_millis(
+    let var = if lookup(get, &signal_var).is_some() {
+        signal_var
+    } else {
+        var_name(None, "_TIMEOUT")
+    };
+    Ok(Duration::from_millis(parse_bounded(
         get,
-        &base_var,
+        &var,
         DEFAULT_TIMEOUT_MS,
+        1,
+        None,
     )?))
 }
 
@@ -414,28 +454,34 @@ fn resolve_signal(
 }
 
 fn resolve_queue(get: Lookup<'_>) -> Result<QueueConfig, EnvError> {
-    let max_queue_size = match lookup(get, "OTEL_BLRP_MAX_QUEUE_SIZE") {
-        Some(v) => v.parse().map_err(|_| EnvError::InvalidNumber {
-            var: "OTEL_BLRP_MAX_QUEUE_SIZE".to_string(),
-            value: v,
-        })?,
-        None => DEFAULT_MAX_QUEUE_SIZE,
-    };
-    let max_export_batch_size = match lookup(get, "OTEL_BLRP_MAX_EXPORT_BATCH_SIZE") {
-        Some(v) => v.parse().map_err(|_| EnvError::InvalidNumber {
-            var: "OTEL_BLRP_MAX_EXPORT_BATCH_SIZE".to_string(),
-            value: v,
-        })?,
-        None => DEFAULT_MAX_EXPORT_BATCH_SIZE,
-    };
-    let schedule_delay = Duration::from_millis(parse_millis(
+    let max_queue_size = parse_bounded(
+        get,
+        "OTEL_BLRP_MAX_QUEUE_SIZE",
+        DEFAULT_MAX_QUEUE_SIZE,
+        1,
+        Some(MAX_QUEUE_SIZE_LIMIT),
+    )?;
+    // The spec requires a batch no larger than the queue; clamping keeps that
+    // true when only the queue size was lowered.
+    let max_export_batch_size = parse_bounded(
+        get,
+        "OTEL_BLRP_MAX_EXPORT_BATCH_SIZE",
+        DEFAULT_MAX_EXPORT_BATCH_SIZE,
+        1,
+        None,
+    )?
+    .min(max_queue_size);
+    let schedule_delay = Duration::from_millis(parse_bounded(
         get,
         "OTEL_BLRP_SCHEDULE_DELAY",
         DEFAULT_SCHEDULE_DELAY_MS,
+        1,
+        None,
     )?);
     Ok(QueueConfig {
-        max_queue_size,
-        max_export_batch_size,
+        max_queue_size: usize::try_from(max_queue_size).expect("bounded by MAX_QUEUE_SIZE_LIMIT"),
+        max_export_batch_size: usize::try_from(max_export_batch_size)
+            .expect("clamped to the queue size"),
         schedule_delay,
     })
 }
@@ -778,6 +824,98 @@ mod tests {
         assert_eq!(cfg.queue.max_queue_size, 10);
         assert_eq!(cfg.queue.max_export_batch_size, 5);
         assert_eq!(cfg.queue.schedule_delay, Duration::from_millis(100));
+    }
+
+    fn out_of_range(extra: (&str, &str)) -> EnvError {
+        let vars = HashMap::from([("OTEL_EXPORTER_OTLP_ENDPOINT", "http://host:4318"), extra]);
+        resolve(&lookup_from(&vars)).unwrap_err()
+    }
+
+    #[test]
+    fn queue_size_zero_is_an_error() {
+        assert!(matches!(
+            out_of_range(("OTEL_BLRP_MAX_QUEUE_SIZE", "0")),
+            EnvError::OutOfRange { min: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn queue_size_above_limit_is_an_error() {
+        for value in ["1000001", "18446744073709551615"] {
+            assert!(
+                matches!(
+                    out_of_range(("OTEL_BLRP_MAX_QUEUE_SIZE", value)),
+                    EnvError::OutOfRange {
+                        max: Some(1_000_000),
+                        ..
+                    }
+                ),
+                "{value}"
+            );
+        }
+        let vars = HashMap::from([
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://host:4318"),
+            ("OTEL_BLRP_MAX_QUEUE_SIZE", "1000000"),
+        ]);
+        let cfg = resolve(&lookup_from(&vars)).unwrap().unwrap();
+        assert_eq!(cfg.queue.max_queue_size, 1_000_000);
+    }
+
+    #[test]
+    fn batch_size_zero_is_an_error() {
+        assert!(matches!(
+            out_of_range(("OTEL_BLRP_MAX_EXPORT_BATCH_SIZE", "0")),
+            EnvError::OutOfRange { min: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn schedule_delay_zero_is_an_error() {
+        assert!(matches!(
+            out_of_range(("OTEL_BLRP_SCHEDULE_DELAY", "0")),
+            EnvError::OutOfRange { min: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn timeout_zero_is_an_error() {
+        for var in [
+            "OTEL_EXPORTER_OTLP_TIMEOUT",
+            "OTEL_EXPORTER_OTLP_LOGS_TIMEOUT",
+            "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT",
+            "OTEL_EXPORTER_OTLP_METRICS_TIMEOUT",
+        ] {
+            let err = out_of_range((var, "0"));
+            assert!(
+                matches!(&err, EnvError::OutOfRange { var: v, .. } if v == var),
+                "{var}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_range_names_the_variable_and_the_bound() {
+        let err = out_of_range(("OTEL_BLRP_SCHEDULE_DELAY", "0"));
+        assert_eq!(
+            err.to_string(),
+            "OTEL_BLRP_SCHEDULE_DELAY is set to 0, but must be at least 1"
+        );
+        let err = out_of_range(("OTEL_BLRP_MAX_QUEUE_SIZE", "0"));
+        assert_eq!(
+            err.to_string(),
+            "OTEL_BLRP_MAX_QUEUE_SIZE is set to 0, but must be between 1 and 1000000"
+        );
+    }
+
+    #[test]
+    fn batch_larger_than_queue_is_clamped() {
+        let vars = HashMap::from([
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://host:4318"),
+            ("OTEL_BLRP_MAX_QUEUE_SIZE", "10"),
+        ]);
+        let cfg = resolve(&lookup_from(&vars)).unwrap().unwrap();
+        assert_eq!(cfg.queue.max_queue_size, 10);
+        assert_eq!(cfg.queue.max_export_batch_size, 10);
     }
 
     #[test]
