@@ -112,7 +112,8 @@ A variable that is already exported always wins over the file, so `~/.env`
 supplies defaults rather than overrides. Only this fixed path is read — never a
 `.env` in the working directory, because a daemon must not pick up credentials
 from wherever it happened to be started. A missing or unreadable `~/.env` is not
-an error. The file usually holds secrets, so keep it mode `0600`.
+an error, and neither is a line with an empty key or a NUL byte: such lines are
+skipped. The file usually holds secrets, so keep it mode `0600`.
 
 ### Config file
 

@@ -152,16 +152,16 @@ more specific override).
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset)* | Base endpoint. Each signal appends its own path (`v1/logs`, `v1/traces`, `v1/metrics`) with exactly one `/`, e.g. `http://host:4318` and `http://host:4318/otlp` both work as expected. |
 | `OTEL_EXPORTER_OTLP_{LOGS,TRACES,METRICS}_ENDPOINT` | *(unset)* | Per-signal endpoint override, used **verbatim** — no path is appended. |
 | `OTEL_EXPORTER_OTLP_HEADERS` / `_{LOGS,TRACES,METRICS}_HEADERS` | *(unset)* | `k=v,k2=v2`, percent-decoded. A per-signal value **shadows** the base value; it does not merge with it. |
-| `OTEL_EXPORTER_OTLP_TIMEOUT` / `_{LOGS,TRACES,METRICS}_TIMEOUT` | `10000` (ms) | Per-request export timeout. |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` / `_{LOGS,TRACES,METRICS}_TIMEOUT` | `10000` (ms) | Per-request export timeout; must be ≥ 1. |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` / `_{LOGS,TRACES,METRICS}_PROTOCOL` | `http/protobuf` | Only value accepted; anything else is a startup error. |
 | `OTEL_EXPORTER_OTLP_COMPRESSION` / `_{LOGS,TRACES,METRICS}_COMPRESSION` | `none` | Only value accepted; anything else is a startup error. |
 | `OTEL_{LOGS,TRACES,METRICS}_EXPORTER` | `otlp` | `otlp` or `none`. `none` is the per-signal off switch, checked before any endpoint parsing. |
 | `OTEL_TRACES_SAMPLER` | `always_on` | `always_on` or `parentbased_always_on`. Validated at startup even if the traces signal ends up unconfigured. |
 | `OTEL_METRIC_EXPORT_INTERVAL` | `60000` (ms) | Metrics export period. `0` is rejected (a busy loop, not "export immediately"). |
 | `OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE` | `cumulative` | Only value accepted; `delta`/`lowmemory` are startup errors. |
-| `OTEL_BLRP_MAX_QUEUE_SIZE` | `2048` | Bounded export queue size, shared by every signal's export task. |
-| `OTEL_BLRP_MAX_EXPORT_BATCH_SIZE` | `512` | Records per export batch. |
-| `OTEL_BLRP_SCHEDULE_DELAY` | `5000` (ms) | Delay between scheduled batch flushes. |
+| `OTEL_BLRP_MAX_QUEUE_SIZE` | `2048` | Bounded export queue size, shared by every signal's export task; must be 1–1000000. |
+| `OTEL_BLRP_MAX_EXPORT_BATCH_SIZE` | `512` | Records per export batch; must be ≥ 1, and is clamped to the queue size. |
+| `OTEL_BLRP_SCHEDULE_DELAY` | `5000` (ms) | Delay between scheduled batch flushes; must be ≥ 1. |
 
 The following are **rejected at startup**, base and per-signal alike, because
 honoring them would change the wire without the operator noticing:
