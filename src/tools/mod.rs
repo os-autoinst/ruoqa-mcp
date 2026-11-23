@@ -35,6 +35,12 @@ pub(crate) const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
 /// `get_step_needles`: upper bound on `max_candidates`, keeping the reply to
 /// a handful of images.
 pub(crate) const MAX_NEEDLE_CANDIDATES: usize = 3;
+/// `get_step_needles`: candidates whose metadata the JSON block lists, best
+/// first; the full count is reported as `needle_count`.
+pub(crate) const MAX_NEEDLE_LIST: usize = 20;
+/// `get_step_needles`: bytes held back from the result cap for the JSON
+/// block and the per-block envelope when budgeting images.
+pub(crate) const RESULT_RESERVE: usize = 64 * 1024;
 /// Bytes read by the initial `Range: bytes=0-511` probe: enough to sniff
 /// gzip/xz/tar magic bytes and, on a 206, learn the artifact's total size.
 pub(crate) const PROBE_BYTES: u64 = 512;

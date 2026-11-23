@@ -19,7 +19,8 @@ use crate::summary::{shape_job_groups, summarize_jobs};
 use crate::tools::artifact;
 use crate::tools::{
     DIGEST_CONTEXT_LINES, DIGEST_MAX_HITS, DIGEST_TAIL_LINES, MAX_ARCHIVE_MEMBERS,
-    MAX_ARTIFACT_BYTES, MAX_IDS, MAX_IMAGE_BYTES, MAX_NEEDLE_CANDIDATES, PROBE_BYTES, bounded,
+    MAX_ARTIFACT_BYTES, MAX_IDS, MAX_IMAGE_BYTES, MAX_NEEDLE_CANDIDATES, MAX_NEEDLE_LIST,
+    MAX_RESULT_BYTES, PROBE_BYTES, RESULT_RESERVE, bounded,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -329,6 +330,8 @@ pub struct GetStepNeedles {
     pub step: i64,
     /// How many candidate needle images to return besides the screenshot
     /// (default 1, at most 3). The matched needle, if any, counts first.
+    /// Images that would push the reply over the 8 MiB result limit are
+    /// skipped and reported as `image_error`.
     #[serde(default)]
     #[schemars(range(max = MAX_NEEDLE_CANDIDATES))]
     pub max_candidates: Option<usize>,
@@ -1311,7 +1314,9 @@ candidates as MCP image content, after a JSON block naming them (`images` lists 
 in order). `module` and `step` are required: take them from `get_job_log_errors` \
 (`failed_modules[].steps[]`, the `#step/<module>/<num>` link). The matched needle, if any, comes \
 first; the rest are ordered by mean similarity. A needle whose image can't be fetched is reported \
-as `image_error` and skipped; a missing screenshot fails the call. Each image is capped at 4 MiB.",
+as `image_error` and skipped, as is one that would push the reply past the 8 MiB result limit; a \
+missing screenshot fails the call. Each image is capped at 4 MiB. `needles` lists at most 20 \
+candidates; `needle_count` is the total.",
         annotations(read_only_hint = true)
     )]
     async fn get_step_needles(
@@ -1376,6 +1381,8 @@ as `image_error` and skipped; a missing screenshot fails the call. Each image is
             );
         }
 
+        let budget = MAX_RESULT_BYTES - RESULT_RESERVE;
+        let mut encoded = base64_len(shot.len());
         let mut images = vec![("screenshot".to_string(), shot)];
         for candidate in needle_step.needles.iter_mut().take(max_candidates) {
             let Some(path) = candidate.image_path.as_deref() else {
@@ -1383,15 +1390,24 @@ as `image_error` and skipped; a missing screenshot fails the call. Each image is
             };
             match artifact::fetch_bytes(client, &ctx, path, MAX_IMAGE_BYTES).await {
                 Ok(b) if artifact::is_png(&b) => {
-                    images.push((format!("needle:{}", candidate.name), b));
+                    if encoded + base64_len(b.len()) > budget {
+                        candidate.image_error =
+                            Some("skipped: reply would exceed the 8 MiB result limit".to_string());
+                    } else {
+                        encoded += base64_len(b.len());
+                        images.push((format!("needle:{}", candidate.name), b));
+                    }
                 }
                 Ok(_) => candidate.image_error = Some("not a PNG".to_string()),
                 Err(bail) => candidate.image_error = Some(artifact::bail_message(bail)),
             }
         }
 
+        let needle_count = needle_step.needles.len();
+        needle_step.needles.truncate(MAX_NEEDLE_LIST);
         let mut reply = json!(needle_step);
         reply["job_id"] = json!(job_id);
+        reply["needle_count"] = json!(needle_count);
         reply["images"] = json!(images.iter().map(|(label, _)| label).collect::<Vec<_>>());
         let mut content = vec![ContentBlock::json(reply)?];
         content.extend(
@@ -1410,6 +1426,11 @@ other tool's `server` argument must be one of these values.",
     async fn list_servers(&self) -> Result<CallToolResult, ErrorData> {
         ok(json!({ "servers": self.servers.identifiers() }))
     }
+}
+
+/// Length of `STANDARD.encode` output for `n` raw bytes (padded).
+fn base64_len(n: usize) -> usize {
+    4 * n.div_ceil(3)
 }
 
 /// Appends the tail to `scan`'s hits when [`artifact::TAIL_ALWAYS`] is
