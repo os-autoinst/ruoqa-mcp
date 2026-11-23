@@ -400,6 +400,10 @@ impl Sink {
     }
 
     fn rotate(&mut self) -> io::Result<()> {
+        self.rotate_using(open_append)
+    }
+
+    fn rotate_using(&mut self, open: impl Fn(&Path) -> io::Result<File>) -> io::Result<()> {
         let keep = self.rotate_keep;
         ignore_not_found(std::fs::remove_file(numbered(&self.path, keep)))?;
         for i in (1..keep).rev() {
@@ -409,7 +413,17 @@ impl Sink {
             ))?;
         }
         std::fs::rename(&self.path, numbered(&self.path, 1))?;
-        self.file = open_append(&self.path)?;
+        match open(&self.path) {
+            Ok(file) => self.file = file,
+            Err(e) => {
+                // Put the live file back so `self.file`, `self.len` and the
+                // path agree again; otherwise every later rotate fails.
+                if let Err(restore) = std::fs::rename(numbered(&self.path, 1), &self.path) {
+                    tracing::warn!(error = %restore, path = %self.path.display(), "audit sink could not restore the live file after a failed rotation");
+                }
+                return Err(e);
+            }
+        }
         self.len = 0;
         Ok(())
     }
@@ -1206,6 +1220,27 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert_eq!(text.lines().count(), 1);
         assert!(!numbered(&path, 1).exists());
+    }
+
+    #[test]
+    fn failed_reopen_after_rotation_restores_the_live_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("audit.jsonl");
+        let cfg = AuditConfig::parse(&format!("path = {:?}\n", path.to_str().unwrap())).unwrap();
+        let mut sink = Sink::open(&cfg).unwrap().unwrap();
+        sink.append("first").unwrap();
+
+        sink.rotate_using(|_| Err(io::Error::other("injected")))
+            .unwrap_err();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\n");
+        sink.append("second").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first\nsecond\n");
+        sink.rotate().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(numbered(&path, 1)).unwrap(),
+            "first\nsecond\n"
+        );
     }
 
     /// Deterministic append failure with no test-only hook: a read-only
