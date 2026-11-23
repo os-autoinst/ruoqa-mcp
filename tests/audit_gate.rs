@@ -131,6 +131,18 @@ fn skip_if_root() -> bool {
     }
 }
 
+/// Arguments whose audit record exceeds the sink's rotation bound. Argument
+/// values are size-capped, so the bulk comes from many unlisted keys, each
+/// recorded as a short `{"_len": n}`.
+#[cfg(unix)]
+fn oversized_comment_args() -> Value {
+    let mut args = json!({"job_id": 7, "text": "x"});
+    for i in 0..400 {
+        args[format!("filler_{i}")] = json!(0);
+    }
+    args
+}
+
 /// Locks `dir`, primes exactly one persistence failure (an oversized write
 /// that forces a denied `rotate()`), then makes one `tool` call and checks
 /// whether it was refused with `kind = "audit_unavailable"`. Unlocks `dir`
@@ -146,13 +158,7 @@ async fn assert_gate_outcome(fail_mode: &str, tool: &str, args: Value, should_re
     let client = run_server(&mock, auditor).await;
 
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-    let big_text = "x".repeat(5000);
-    call(
-        &client,
-        "add_job_comment",
-        json!({"job_id": 7, "text": big_text}),
-    )
-    .await;
+    call(&client, "add_job_comment", oversized_comment_args()).await;
 
     let result = call(&client, tool, args).await;
 
@@ -235,15 +241,9 @@ async fn recovery_emits_one_gap_record_then_stops_refusing() {
     let client = run_server(&mock, Arc::clone(&auditor)).await;
 
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-    let big_text = "x".repeat(5000);
     // One priming failure: not yet refused (failing was false), but its own
     // append fails, setting `failing`.
-    call(
-        &client,
-        "add_job_comment",
-        json!({"job_id": 7, "text": big_text}),
-    )
-    .await;
+    call(&client, "add_job_comment", oversized_comment_args()).await;
 
     // Refused per the pre-existing `failing` state; its own (small) audit
     // record needs no rotation, so this same call's write is what recovers.
