@@ -39,14 +39,19 @@ pub(super) fn write_uint32(buf: &mut Vec<u8>, field: u32, v: u32) {
     }
 }
 
-/// `int64` is plain varint, not zigzag — `sint64` is the zigzag variant and
-/// OTLP does not use it. A negative value two's-complement-reinterprets as
-/// `u64`, producing the correct ten-byte varint.
-fn write_int64(buf: &mut Vec<u8>, field: u32, v: i64) {
-    if v != 0 {
-        write_tag(buf, field, WIRE_VARINT);
-        write_varint(buf, v.cast_unsigned());
-    }
+/// `bool`, unconditionally; see [`write_string_always`].
+fn write_bool_always(buf: &mut Vec<u8>, field: u32, v: bool) {
+    write_tag(buf, field, WIRE_VARINT);
+    write_varint(buf, u64::from(v));
+}
+
+/// `int64`, unconditionally; see [`write_string_always`]. Plain varint, not
+/// zigzag — `sint64` is the zigzag variant and OTLP does not use it. A
+/// negative value two's-complement-reinterprets as `u64`, producing the
+/// correct ten-byte varint.
+fn write_int64_always(buf: &mut Vec<u8>, field: u32, v: i64) {
+    write_tag(buf, field, WIRE_VARINT);
+    write_varint(buf, v.cast_unsigned());
 }
 
 pub(super) fn write_fixed32(buf: &mut Vec<u8>, field: u32, v: u32) {
@@ -60,13 +65,6 @@ pub(super) fn write_fixed64(buf: &mut Vec<u8>, field: u32, v: u64) {
     if v != 0 {
         write_tag(buf, field, WIRE_FIXED64);
         buf.extend_from_slice(&v.to_le_bytes());
-    }
-}
-
-fn write_double(buf: &mut Vec<u8>, field: u32, v: f64) {
-    if v != 0.0 {
-        write_tag(buf, field, WIRE_FIXED64);
-        buf.extend_from_slice(&v.to_bits().to_le_bytes());
     }
 }
 
@@ -85,6 +83,14 @@ pub(super) fn write_sfixed64_always(buf: &mut Vec<u8>, field: u32, v: i64) {
 pub(super) fn write_double_always(buf: &mut Vec<u8>, field: u32, v: f64) {
     write_tag(buf, field, WIRE_FIXED64);
     buf.extend_from_slice(&v.to_bits().to_le_bytes());
+}
+
+/// `string`, unconditionally. A `oneof` arm has explicit presence, so an
+/// empty `AnyValue.string_value` must still be written to be set at all.
+fn write_string_always(buf: &mut Vec<u8>, field: u32, v: &str) {
+    write_tag(buf, field, WIRE_LEN);
+    write_varint(buf, v.len() as u64);
+    buf.extend_from_slice(v.as_bytes());
 }
 
 pub(super) fn write_string(buf: &mut Vec<u8>, field: u32, v: &str) {
@@ -150,13 +156,15 @@ pub(crate) enum Value<'a> {
 }
 
 /// `AnyValue`: a oneof over field numbers 1 (`string_value`), 2
-/// (`bool_value`), 3 (`int_value`) and 4 (`double_value`).
+/// (`bool_value`), 3 (`int_value`) and 4 (`double_value`). The arm is always
+/// written, zero or not: a oneof has explicit presence, so an empty body
+/// means "no value", not "zero".
 pub(super) fn write_any_value(buf: &mut Vec<u8>, field: u32, v: &Value<'_>) {
     write_message(buf, field, |b| match *v {
-        Value::Str(s) => write_string(b, 1, s),
-        Value::Bool(bool_v) => write_bool(b, 2, bool_v),
-        Value::Int(i) => write_int64(b, 3, i),
-        Value::Double(d) => write_double(b, 4, d),
+        Value::Str(s) => write_string_always(b, 1, s),
+        Value::Bool(bool_v) => write_bool_always(b, 2, bool_v),
+        Value::Int(i) => write_int64_always(b, 3, i),
+        Value::Double(d) => write_double_always(b, 4, d),
     });
 }
 
@@ -215,7 +223,7 @@ mod tests {
     #[test]
     fn int64_negative_is_ten_byte_varint() {
         let mut buf = Vec::new();
-        write_int64(&mut buf, 1, -1);
+        write_int64_always(&mut buf, 1, -1);
         // tag(field=1, VARINT) = 0x08, then ten 0xff-pattern varint bytes for u64::MAX.
         assert_eq!(buf[0], 0x08);
         assert_eq!(buf.len(), 1 + 10);
@@ -303,7 +311,7 @@ mod tests {
     #[test]
     fn double_golden() {
         let mut buf = Vec::new();
-        write_double(&mut buf, 1, 1.5);
+        write_double_always(&mut buf, 1, 1.5);
         let mut expected = vec![0x09];
         expected.extend_from_slice(&1.5f64.to_bits().to_le_bytes());
         assert_eq!(buf, expected);
@@ -331,16 +339,12 @@ mod tests {
     }
 
     #[test]
-    fn double_always_writes_zero_where_write_double_would_omit_it() {
+    fn double_always_writes_zero() {
         let mut always = Vec::new();
         write_double_always(&mut always, 5, 0.0);
         let mut expected = vec![0x29]; // tag(field=5, FIXED64)
         expected.extend_from_slice(&0.0f64.to_bits().to_le_bytes());
         assert_eq!(always, expected);
-
-        let mut omitted = Vec::new();
-        write_double(&mut omitted, 5, 0.0);
-        assert!(omitted.is_empty(), "write_double omits a zero value");
     }
 
     #[test]
@@ -410,6 +414,37 @@ mod tests {
         ];
         expected.extend_from_slice(&1.5f64.to_bits().to_le_bytes());
         assert_eq!(buf, expected);
+    }
+
+    #[test]
+    fn key_value_zero_values_keep_their_oneof_arm() {
+        // KeyValue{key="k"} header: 3 bytes of key + 2 of value tag/len.
+        let envelope = |value_len: u8| vec![0x0a, 5 + value_len, 0x0a, 0x01, b'k', 0x12, value_len];
+
+        let mut buf = Vec::new();
+        write_key_value(&mut buf, 1, "k", &Value::Str(""));
+        let mut expected = envelope(2);
+        expected.extend_from_slice(&[0x0a, 0x00]); // string_value: tag(1,LEN), len=0
+        assert_eq!(buf, expected, "Str(\"\")");
+
+        let mut buf = Vec::new();
+        write_key_value(&mut buf, 1, "k", &Value::Bool(false));
+        let mut expected = envelope(2);
+        expected.extend_from_slice(&[0x10, 0x00]); // bool_value: tag(2,VARINT), false
+        assert_eq!(buf, expected, "Bool(false)");
+
+        let mut buf = Vec::new();
+        write_key_value(&mut buf, 1, "k", &Value::Int(0));
+        let mut expected = envelope(2);
+        expected.extend_from_slice(&[0x18, 0x00]); // int_value: tag(3,VARINT), 0
+        assert_eq!(buf, expected, "Int(0)");
+
+        let mut buf = Vec::new();
+        write_key_value(&mut buf, 1, "k", &Value::Double(0.0));
+        let mut expected = envelope(9);
+        expected.push(0x21); // double_value: tag(4,FIXED64)
+        expected.extend_from_slice(&[0; 8]);
+        assert_eq!(buf, expected, "Double(0.0)");
     }
 
     #[test]

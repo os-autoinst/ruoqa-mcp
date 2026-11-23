@@ -325,6 +325,28 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_any_value_zero_variants() {
+        // Each literal is KeyValue{key="k", value=AnyValue{<arm at zero>}}
+        // wrapped as field 1; the arm must still be present after decoding.
+        let str_kv = [0x0a, 0x07, 0x0a, 0x01, b'k', 0x12, 0x02, 0x0a, 0x00];
+        let value = Message::parse(&str_kv).unwrap().msg(1).unwrap().msg(2);
+        assert_eq!(value.unwrap().get(1), Some(&Field::Len(vec![])));
+
+        let bool_kv = [0x0a, 0x07, 0x0a, 0x01, b'k', 0x12, 0x02, 0x10, 0x00];
+        let value = Message::parse(&bool_kv).unwrap().msg(1).unwrap().msg(2);
+        assert_eq!(value.unwrap().get(2), Some(&Field::Varint(0)));
+
+        let int_kv = [0x0a, 0x07, 0x0a, 0x01, b'k', 0x12, 0x02, 0x18, 0x00];
+        let value = Message::parse(&int_kv).unwrap().msg(1).unwrap().msg(2);
+        assert_eq!(value.unwrap().get(3), Some(&Field::Varint(0)));
+
+        let mut double_kv = vec![0x0a, 0x0e, 0x0a, 0x01, b'k', 0x12, 0x09, 0x21];
+        double_kv.extend_from_slice(&[0; 8]);
+        let value = Message::parse(&double_kv).unwrap().msg(1).unwrap().msg(2);
+        assert_eq!(value.unwrap().get(4), Some(&Field::Fixed64(0)));
+    }
+
+    #[test]
     fn round_trips_resource_two_attributes() {
         // Resource{attributes=[KeyValue{"service.name","ruoqa-mcp"},
         //                      KeyValue{"service.version","1.2.3"}]}
