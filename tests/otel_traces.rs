@@ -347,25 +347,30 @@ async fn malformed_traceparent_falls_back_to_a_root_span() {
         .expect("OTEL_EXPORTER_OTLP_ENDPOINT is set");
     let client = run_server(&openqa, telemetry.trace_producer()).await;
 
-    let result = call(
-        &client,
-        "get_job",
-        json!({"job_id": 1}),
-        Some("not-a-traceparent"),
-    )
-    .await
-    .expect("a malformed traceparent must not fail the call");
-    assert_ne!(result.is_error, Some(true));
+    let multibyte = format!("00-0é{}-00f067aa0ba902b7-01", "0".repeat(29));
+    for bad in ["not-a-traceparent", multibyte.as_str()] {
+        let result = call(&client, "get_job", json!({"job_id": 1}), Some(bad))
+            .await
+            .expect("a malformed traceparent must not fail the call");
+        assert_ne!(result.is_error, Some(true), "{bad:?}");
+    }
 
     telemetry.shutdown().await;
 
     let requests = requests_to(&collector, "/v1/traces").await;
     let spans = decode_spans(&requests[1].body);
-    let tool_span = spans
+    let tool_spans: Vec<_> = spans
         .iter()
-        .find(|s| span_name(s).as_deref() == Some("mcp.tool/get_job"))
-        .expect("a root span was still exported");
-    assert!(span_parent_id(tool_span).is_none(), "must be a root span");
+        .filter(|s| span_name(s).as_deref() == Some("mcp.tool/get_job"))
+        .collect();
+    assert_eq!(
+        tool_spans.len(),
+        2,
+        "a root span per call was still exported"
+    );
+    for tool_span in tool_spans {
+        assert!(span_parent_id(tool_span).is_none(), "must be a root span");
+    }
 
     unsafe { std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT") };
 }
