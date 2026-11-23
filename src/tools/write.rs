@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::Method;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::CallToolResult;
+use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, tool, tool_router};
 use schemars::JsonSchema;
@@ -16,12 +16,20 @@ use serde_json::{Map, Value, json};
 
 use crate::error::{classify, tool_error};
 use crate::form::Form;
+use crate::github::{GithubRef, parse_github_ref};
 use crate::query::{Query, api};
 use crate::server::{OpenQaServer, ok, to_result};
-use crate::tools::clone::{self, CloneOptions, Job, PlanError, SettingArg, compose_form};
+use crate::tools::artifact::{self, Bail};
+use crate::tools::clone::{
+    self, CloneOptions, Job, PlanError, Refspec, SettingArg, compose_form, derive_productdir,
+    refspec_args,
+};
 use crate::tools::{
     MAX_CLONE_JOBS, MAX_CLONE_SETTINGS, MAX_EXTRA_ENTRIES, MAX_RESTART_JOBS, bounded,
 };
+
+/// Ceiling on the `vars.json` read to derive `PRODUCTDIR`.
+const MAX_VARS_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct RestartJobs {
@@ -102,7 +110,7 @@ pub struct CloneJob {
     #[serde(default)]
     pub skip_deps: Option<bool>,
     /// Do not clone chained and directly chained parents, keep parallel ones
-    /// (default false).
+    /// (default false; true with `github_ref`).
     #[serde(default)]
     pub skip_chained_deps: Option<bool>,
     /// Also clone chained and directly chained children (default false;
@@ -112,12 +120,20 @@ pub struct CloneJob {
     /// How deep children are followed (default 1, 0 = unlimited).
     #[serde(default)]
     pub max_depth: Option<u32>,
-    /// Apply every setting to cloned parents too (default false).
+    /// Apply every setting to cloned parents too (default false; true with
+    /// `github_ref`).
     #[serde(default)]
     pub parental_inheritance: Option<bool>,
     /// Return the settings the clones would be created with, create nothing.
     #[serde(default)]
     pub dry_run: Option<bool>,
+    /// A GitHub pull request (`https://github.com/<owner>/<repo>/pull/<n>`)
+    /// or branch (`https://github.com/<owner>/<repo>/tree/<branch>`) whose
+    /// test code the clones should run. Derives `_GROUP=0`, `TEST`, `BUILD`,
+    /// `CASEDIR` and `PRODUCTDIR` like `openqa-clone-custom-git-refspec`;
+    /// entries in `settings` override them.
+    #[serde(default)]
+    pub github_ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -501,7 +517,8 @@ openqa-clone-job --within-instance), e.g. to verify a test-code fix. Copies the 
 dependency cluster: parents (see skip_deps, skip_chained_deps), parallel children, and with \
 clone_children chained children (see max_depth); at most 50 jobs. Pass `_GROUP=0` in \
 settings so clones stay off production dashboards, and skip_chained_deps to avoid re-running \
-install jobs. Use dry_run first to see the exact settings. Differs from duplicate_job and restart_jobs, which take no overrides. \
+install jobs. Use dry_run first to see the exact settings. github_ref runs a GitHub PR or \
+branch's test code. Differs from duplicate_job and restart_jobs, which take no overrides. \
 Needs operator credentials; secrets the credential cannot read stay `[redacted]` and are \
 listed under warnings.",
         annotations(
@@ -518,7 +535,7 @@ listed under warnings.",
         let client = self.resolve_server(&args.server)?;
         let raw = args.settings.unwrap_or_default();
         bounded("settings", raw.len(), 0, MAX_CLONE_SETTINGS)?;
-        let parsed = raw
+        let mut parsed = raw
             .iter()
             .enumerate()
             .map(|(i, entry)| {
@@ -526,13 +543,38 @@ listed under warnings.",
                     .map_err(|e| ErrorData::invalid_params(format!("settings[{i}]: {e}"), None))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let github_ref = args
+            .github_ref
+            .as_deref()
+            .map(parse_github_ref)
+            .transpose()
+            .map_err(|e| ErrorData::invalid_params(e, None))?;
 
+        let mut derived = None;
+        if let Some(github_ref) = &github_ref {
+            let lines = match self
+                .derive_refspec(&ctx, client, args.job_id, github_ref, &parsed)
+                .await
+            {
+                Ok(lines) => lines,
+                Err(bail) => return bail,
+            };
+            let mut args = lines
+                .iter()
+                .map(|l| SettingArg::parse(l).expect("derived settings follow the grammar"))
+                .collect::<Vec<_>>();
+            args.append(&mut parsed);
+            parsed = args;
+            derived = Some(lines);
+        }
+
+        let from_ref = github_ref.is_some();
         let opts = CloneOptions {
             skip_deps: args.skip_deps.unwrap_or(false),
-            skip_chained_deps: args.skip_chained_deps.unwrap_or(false),
+            skip_chained_deps: args.skip_chained_deps.unwrap_or(from_ref),
             clone_children: args.clone_children.unwrap_or(false),
             max_depth: args.max_depth.unwrap_or(1),
-            parental_inheritance: args.parental_inheritance.unwrap_or(false),
+            parental_inheritance: args.parental_inheritance.unwrap_or(from_ref),
         };
         let base = client.base_url().as_str().trim_end_matches('/').to_string();
 
@@ -609,6 +651,9 @@ listed under warnings.",
         }
         if let Some(warnings) = clone::warnings(&plan, &cache) {
             reply.insert("warnings".into(), warnings);
+        }
+        if let Some(derived) = derived {
+            reply.insert("derived_settings".into(), json!(derived));
         }
         ok(Value::Object(reply))
     }
@@ -1013,6 +1058,101 @@ reserve_worker. Returns the affected `worker_ids`.",
             .await,
         )
     }
+}
+
+impl OpenQaServer {
+    /// The `clone_job` arguments `github_ref` stands for.
+    async fn derive_refspec(
+        &self,
+        ctx: &RequestContext<RoleServer>,
+        client: &ruoqa::Client,
+        job_id: i64,
+        github_ref: &GithubRef,
+        args: &[SettingArg],
+    ) -> Result<Vec<String>, Bail> {
+        let (repo, branch, pull_number) = match github_ref {
+            GithubRef::Pull {
+                owner,
+                repo,
+                number,
+            } => {
+                let head = self.github.pull_head(owner, repo, *number).await?;
+                (head.repo, head.branch, Some(*number))
+            }
+            GithubRef::Branch {
+                owner,
+                repo,
+                branch,
+            } => (format!("{owner}/{repo}"), branch.clone(), None),
+        };
+        let caller_sets_productdir = args
+            .iter()
+            .any(|a| a.key == "PRODUCTDIR" && a.scope.is_none());
+        let productdir = if caller_sets_productdir {
+            None
+        } else {
+            Some(self.productdir_for(ctx, client, job_id, &repo).await?)
+        };
+        Ok(refspec_args(
+            &Refspec {
+                repo: &repo,
+                branch: &branch,
+                pull_number,
+            },
+            productdir.as_deref(),
+        ))
+    }
+
+    async fn productdir_for(
+        &self,
+        ctx: &RequestContext<RoleServer>,
+        client: &ruoqa::Client,
+        job_id: i64,
+        repo: &str,
+    ) -> Result<String, Bail> {
+        let path = format!("/tests/{job_id}/file/vars.json");
+        let bytes = artifact::fetch_bytes(client, ctx, &path, MAX_VARS_BYTES)
+            .await
+            .map_err(with_productdir_hint)?;
+        let vars: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        let var = |name: &str| vars.get(name).and_then(Value::as_str);
+        let (Some(casedir), Some(productdir)) = (var("CASEDIR"), var("PRODUCTDIR")) else {
+            return Err(with_productdir_hint(tool_error(
+                "invalid_response",
+                None,
+                format!("job {job_id}'s vars.json has no CASEDIR and PRODUCTDIR"),
+                None,
+            )));
+        };
+        let basename = repo.rsplit('/').next().unwrap_or(repo);
+        Ok(derive_productdir(casedir, productdir, basename))
+    }
+}
+
+/// Append how to bypass the `vars.json` lookup to a tool error.
+fn with_productdir_hint(bail: Bail) -> Bail {
+    let Ok(result) = bail else { return bail };
+    let payload = result.content.first().and_then(|c| match c {
+        ContentBlock::Text(t) => serde_json::from_str::<Value>(&t.text).ok(),
+        _ => None,
+    });
+    let Some(error) = payload.as_ref().and_then(|p| p.get("error")) else {
+        return Ok(result);
+    };
+    let text = |key: &str| error.get(key).and_then(Value::as_str);
+    tool_error(
+        text("kind").unwrap_or("internal"),
+        error
+            .get("status")
+            .and_then(Value::as_u64)
+            .and_then(|s| u16::try_from(s).ok()),
+        format!(
+            "{} (clone_job reads the job's vars.json to derive PRODUCTDIR; pass an explicit \
+             PRODUCTDIR=... in settings to skip it)",
+            text("message").unwrap_or_default()
+        ),
+        text("body"),
+    )
 }
 
 #[cfg(test)]

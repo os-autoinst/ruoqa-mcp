@@ -8,6 +8,7 @@ pub mod config;
 pub mod dotenv;
 pub(crate) mod error;
 pub mod form;
+pub mod github;
 pub mod heartbeat;
 pub mod http;
 pub(crate) mod otel;

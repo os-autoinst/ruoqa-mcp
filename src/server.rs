@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 use crate::audit::{self, Auditor, Outcome, RecordScope, Transport};
 use crate::error::{audit_unavailable, classify, kind_of, tool_error};
 use crate::form::Form;
+use crate::github::GitHub;
 use crate::heartbeat::with_heartbeat;
 use crate::http::{Scope, scope_of};
 use crate::otel::{self, traces::SpanCtx};
@@ -180,6 +181,8 @@ pub struct OpenQaServer {
     /// The metrics registry. `None` means metrics are off: `call_tool` takes
     /// no lock and allocates nothing.
     metrics: Option<MetricRecorder>,
+    /// Resolves `github_ref` pull requests for `clone_job`.
+    pub(crate) github: Arc<GitHub>,
 }
 
 impl OpenQaServer {
@@ -212,6 +215,7 @@ impl OpenQaServer {
             transport: Transport::Stdio,
             traces: None,
             metrics: None,
+            github: Arc::new(GitHub::from_env()),
         }
     }
 
@@ -256,6 +260,13 @@ impl OpenQaServer {
     #[must_use]
     pub fn with_metrics(mut self, metrics: Option<MetricRecorder>) -> Self {
         self.metrics = metrics;
+        self
+    }
+
+    /// Replace the GitHub client, so tests can point it elsewhere.
+    #[must_use]
+    pub fn with_github(mut self, github: GitHub) -> Self {
+        self.github = Arc::new(github);
         self
     }
 
