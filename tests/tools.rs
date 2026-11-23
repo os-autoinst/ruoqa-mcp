@@ -1583,6 +1583,34 @@ async fn get_job_log_filename_with_slash_is_rejected() {
 }
 
 #[tokio::test]
+async fn get_job_log_rejects_out_of_range_params() {
+    let mock = MockServer::start().await;
+    let client = server_with_mock(&mock, true).await;
+
+    for (field, value) in [
+        ("tail_lines", 100_001),
+        ("context_lines", 101),
+        ("max_matches", 1001),
+    ] {
+        let mut args = json!({"job_id": 1, "filename": "log.txt", "grep": "x"});
+        args[field] = json!(value);
+        let err = call(&client, "get_job_log", args)
+            .await
+            .expect_err("out-of-range param must be rejected");
+
+        let rmcp::ServiceError::McpError(mcp_err) = err else {
+            panic!("expected McpError, got {err:?}");
+        };
+        assert_eq!(
+            mcp_err.code,
+            rmcp::model::ErrorCode::INVALID_PARAMS,
+            "{field}"
+        );
+    }
+    assert!(mock.received_requests().await.expect("requests").is_empty());
+}
+
+#[tokio::test]
 async fn get_job_log_grep_returns_matches_with_context() {
     let mock = MockServer::start().await;
     let body = "one\ntwo\nERROR: boom\nfour\nfive\n";
