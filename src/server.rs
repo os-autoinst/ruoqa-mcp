@@ -398,7 +398,7 @@ impl OpenQaServer {
         self.authorize(&request.name, &context)?;
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
         let dispatch = self.tool_router.call(tcc);
-        match self.call_timeout {
+        let response = match self.call_timeout {
             Some(timeout) => match tokio::time::timeout(timeout, dispatch).await {
                 Ok(result) => result,
                 Err(_) => Ok(tool_error(
@@ -414,6 +414,10 @@ impl OpenQaServer {
                 .into()),
             },
             None => dispatch.await,
+        };
+        match response {
+            Ok(CallToolResponse::Complete(result)) => cap_result(result).map(Into::into),
+            other => other,
         }
     }
 }
@@ -446,13 +450,17 @@ fn log_upstream_request(
 
 /// `204 No Content` comes back as `Value::Null`; normalize to `{}` like the
 /// Python did for its raw httpx response.
-///
-/// A result whose serialized size exceeds [`MAX_RESULT_BYTES`] becomes a
-/// `response_too_large` tool error: an oversized message would overflow some
-/// clients' stdio buffer and drop the whole connection.
 pub(crate) fn ok(value: Value) -> Result<CallToolResult, ErrorData> {
     let value = if value.is_null() { json!({}) } else { value };
-    let result = CallToolResult::success(vec![ContentBlock::json(value)?]);
+    Ok(CallToolResult::success(vec![ContentBlock::json(value)?]))
+}
+
+/// A result whose serialized size exceeds [`MAX_RESULT_BYTES`] becomes a
+/// `response_too_large` tool error: an oversized message would overflow some
+/// clients' stdio buffer and drop the whole connection. Applied once per call
+/// in `dispatch`, so it covers results a tool built without going through
+/// [`ok`].
+fn cap_result(result: CallToolResult) -> Result<CallToolResult, ErrorData> {
     let size = serde_json::to_vec(&result)
         .map_err(|e| ErrorData::internal_error(e.to_string(), None))?
         .len();
@@ -765,14 +773,22 @@ mod tests {
     }
 
     #[test]
-    fn ok_passes_a_result_under_the_cap_through() {
-        let result = ok(json!({"data": "x".repeat(1024)})).unwrap();
+    fn cap_result_passes_a_result_under_the_cap_through() {
+        let result = cap_result(ok(json!({"data": "x".repeat(1024)})).unwrap()).unwrap();
         assert_eq!(result.is_error, Some(false));
     }
 
     #[test]
-    fn ok_turns_a_result_over_the_cap_into_response_too_large() {
-        let result = ok(json!("x".repeat(MAX_RESULT_BYTES))).unwrap();
+    fn cap_result_turns_a_result_over_the_cap_into_response_too_large() {
+        let result = cap_result(ok(json!("x".repeat(MAX_RESULT_BYTES))).unwrap()).unwrap();
+        assert_eq!(result.is_error, Some(true));
+        assert_eq!(error_kind(&result), "response_too_large");
+    }
+
+    #[test]
+    fn cap_result_covers_a_result_built_without_ok() {
+        let image = ContentBlock::image("A".repeat(MAX_RESULT_BYTES), "image/png");
+        let result = cap_result(CallToolResult::success(vec![image])).unwrap();
         assert_eq!(result.is_error, Some(true));
         assert_eq!(error_kind(&result), "response_too_large");
     }
