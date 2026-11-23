@@ -157,7 +157,8 @@ pub(crate) enum Sampler {
 
 /// An `OTEL_*` variable could not be resolved into a valid configuration.
 /// Every variant carries the variable name, never the value where that value
-/// might be a credential (`Header`).
+/// might be a credential (`Header`); `InvalidUrl` keeps its URL with the
+/// userinfo redacted.
 #[derive(Debug)]
 pub(crate) enum EnvError {
     InvalidUrl {
@@ -325,6 +326,21 @@ fn append_path(base: &str, path: &str) -> String {
     format!("{}/{path}", base.trim_end_matches('/'))
 }
 
+/// Replaces the userinfo of an unparseable URL with `***`, so a credential in
+/// an endpoint never reaches an error message.
+fn redact_userinfo(value: &str) -> String {
+    let start = value
+        .find("://")
+        .filter(|&i| !value[..i].contains(['/', '?', '#']))
+        .map_or(0, |i| i + 3);
+    let rest = &value[start..];
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..authority_end].rfind('@') {
+        Some(at) => format!("{}***{}", &value[..start], &rest[at..]),
+        None => value.to_string(),
+    }
+}
+
 fn resolve_endpoint(
     get: Lookup<'_>,
     signal: Signal,
@@ -336,7 +352,7 @@ fn resolve_endpoint(
             .map(Some)
             .map_err(|source| EnvError::InvalidUrl {
                 var: signal_var,
-                value,
+                value: redact_userinfo(&value),
                 source,
             });
     }
@@ -348,7 +364,7 @@ fn resolve_endpoint(
         .map(Some)
         .map_err(|source| EnvError::InvalidUrl {
             var: var_name(None, "_ENDPOINT"),
-            value: full,
+            value: redact_userinfo(&full),
             source,
         })
 }
@@ -916,6 +932,35 @@ mod tests {
         let cfg = resolve(&lookup_from(&vars)).unwrap().unwrap();
         assert_eq!(cfg.queue.max_queue_size, 10);
         assert_eq!(cfg.queue.max_export_batch_size, 10);
+    }
+
+    #[test]
+    fn redact_userinfo_cases() {
+        for (input, expected) in [
+            ("http://u:p@h:x/", "http://***@h:x/"),
+            ("u:p@h", "***@h"),
+            ("http://h/path@x", "http://h/path@x"),
+            ("http://a@b@c/", "http://***@c/"),
+            ("http://h:x", "http://h:x"),
+        ] {
+            assert_eq!(redact_userinfo(input), expected, "{input}");
+        }
+    }
+
+    #[test]
+    fn invalid_url_error_never_shows_the_password() {
+        for var in [
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+        ] {
+            let vars = HashMap::from([(var, "http://user:s3cret@host:notaport")]);
+            let err = resolve(&lookup_from(&vars)).unwrap_err();
+            assert!(matches!(err, EnvError::InvalidUrl { .. }), "{var}");
+            for text in [format!("{err}"), format!("{err:?}")] {
+                assert!(!text.contains("s3cret"), "{var}: {text}");
+                assert!(!text.contains("user:"), "{var}: {text}");
+            }
+        }
     }
 
     #[test]
