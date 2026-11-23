@@ -2622,7 +2622,7 @@ async fn clone_job_redacted_secret_warns_and_still_clones() {
 }
 
 #[tokio::test]
-async fn clone_job_reports_missing_assets_unless_overridden() {
+async fn clone_job_refuses_missing_assets_unless_overridden_or_ignored() {
     let mock = MockServer::start().await;
     mount_clone_job(
         &mock,
@@ -2639,6 +2639,26 @@ async fn clone_job_reports_missing_assets_unless_overridden() {
     let result = call(&client, "clone_job", json!({"job_id": 7}))
         .await
         .expect("call_tool");
+    assert_eq!(result.is_error, Some(true));
+    assert_eq!(text(&result)["error"]["kind"], "missing_assets");
+    assert!(posts(&mock).await.is_empty());
+
+    let result = call(&client, "clone_job", json!({"job_id": 7, "dry_run": true}))
+        .await
+        .expect("call_tool");
+    assert_eq!(
+        text(&result)["warnings"],
+        json!({"missing_assets": {"7": ["hdd/gone.qcow2"]}})
+    );
+
+    let result = call(
+        &client,
+        "clone_job",
+        json!({"job_id": 7, "ignore_missing_assets": true}),
+    )
+    .await
+    .expect("call_tool");
+    assert_eq!(posts(&mock).await.len(), 1);
     assert_eq!(
         text(&result)["warnings"],
         json!({"missing_assets": {"7": ["hdd/gone.qcow2"]}})
