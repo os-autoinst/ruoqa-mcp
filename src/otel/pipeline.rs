@@ -186,15 +186,18 @@ impl Producer {
     /// Enqueues one pre-encoded record. **Never awaits**: callers include the
     /// tool path and the audit sink's lock holder, and a dead collector must
     /// never slow either down. A full queue drops the record and accounts it
-    /// under `queue_full`.
-    pub(crate) fn enqueue(&self, encoded_record: Vec<u8>) {
+    /// under `queue_full`; a closed one under `shutdown`. Returns whether the
+    /// queue accepted the record.
+    pub(crate) fn enqueue(&self, encoded_record: Vec<u8>) -> bool {
         match self.tx.try_send(encoded_record) {
-            Ok(()) => {}
+            Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
                 self.dropped.record(DropReason::QueueFull, 1);
+                false
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 self.dropped.record(DropReason::Shutdown, 1);
+                false
             }
         }
     }
@@ -481,6 +484,20 @@ mod tests {
         assert!(!excluded("reqwestish"));
         assert!(!excluded("hyper_utilish::foo"));
         assert!(!excluded("ruoqa_mcp::server"));
+    }
+
+    #[test]
+    fn enqueue_reports_whether_the_queue_accepted_the_record() {
+        let (tx, rx) = mpsc::channel(1);
+        let producer = Producer::for_test(tx);
+
+        assert!(producer.enqueue(vec![1]));
+        assert!(!producer.enqueue(vec![2]));
+        assert_eq!(producer.dropped.get(DropReason::QueueFull), 1);
+
+        drop(rx);
+        assert!(!producer.enqueue(vec![3]));
+        assert_eq!(producer.dropped.get(DropReason::Shutdown), 1);
     }
 
     #[tokio::test]
