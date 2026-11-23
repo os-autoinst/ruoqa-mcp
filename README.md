@@ -220,7 +220,12 @@ response if that route is unavailable or parses empty; the reply's `source`
 field says which one answered. `get_job_log`'s `tail_lines` is served by an
 absolute byte range (`bytes=<start>-`), never a suffix range
 (`bytes=-<n>`): openQA's `Mojolicious::Static` mishandles the latter,
-returning the *head* of the file labelled as a 206 tail. Both the raw
+returning the *head* of the file labelled as a 206 tail. `tail_lines`,
+`context_lines` and `max_matches` are rejected as `invalid_params` above
+100000, 100 and 1000 respectively. A tail that starts mid-character is
+still decoded, and with `grep` the match `line` numbers count from the start
+of the tail (the reply says `"line_base": "tail"`), since the file's absolute
+line number is unknown on the byte-range path. Both the raw
 download and any decompressed archive content are bounded by a 32 MiB
 ceiling (`max_bytes` may lower it, never raise it); a binary artifact (e.g.
 a video) is refused as `unsupported_media` rather than returned as mangled
@@ -249,15 +254,17 @@ via `/details`) skips the probe entirely rather than costing a 404. Unlike
 `unsupported_media` — `serial_terminal.txt` is raw console output that
 routinely carries stray non-UTF-8 bytes, exactly the jobs this tier exists
 for. Pass `markers` (a list of regexes) to scan `filename` (default
-`autoinst-log.txt`) for something else entirely instead of the tier chain.
+`autoinst-log.txt`) for something else entirely instead of the tier chain;
+if none of them matches (or the list is empty), the reply falls back to the
+`tail` tier.
 The tool also fetches `/api/v1/jobs/<id>/details` (up to ~14 MB,
 best-effort) for the `failed_modules` step deep links; a failed fetch just
 means that field is omitted, never an aborted digest. On the `test_died`
 tier, a reply also carries `location` when the log has it: `step` (the last
 `[step:<category>,<name>,<n>]` debug line before the failure) and `stack`
 (the `--- # stack trace` frames os-autoinst appends to the die message,
-capped at 10 frames). Older or less verbose logs have neither, and
-`location` is omitted rather than sent empty.
+capped at 10 frames, read only from the die's own log entry). Older or less
+verbose logs have neither, and `location` is omitted rather than sent empty.
 
 `get_step_needles` fetches `/api/v1/jobs/<id>/details`, then the step's
 screenshot (`/tests/<id>/images/<name>`) and its needle PNGs
