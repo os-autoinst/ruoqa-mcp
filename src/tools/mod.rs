@@ -1,4 +1,5 @@
 pub mod artifact;
+pub mod clone;
 pub mod read;
 pub mod write;
 
@@ -12,6 +13,10 @@ pub(crate) const MAX_RESTART_JOBS: usize = 500;
 /// `trigger_isos.extra`: each entry becomes a scheduled-product/job-settings
 /// row; entry *values* stay unbounded (e.g. inline `SCENARIO_DEFINITIONS_YAML`).
 pub(crate) const MAX_EXTRA_ENTRIES: usize = 100;
+/// `clone_job.settings`: override entries per call; values stay unbounded.
+pub(crate) const MAX_CLONE_SETTINGS: usize = 100;
+/// `clone_job`: jobs in one dependency cluster, each fetched with one GET.
+pub(crate) const MAX_CLONE_JOBS: usize = 50;
 
 /// Largest serialized tool result `server::ok` will send. Stays under the
 /// 10 MiB stdio buffer some clients (`OpenCode`) enforce, where a bigger

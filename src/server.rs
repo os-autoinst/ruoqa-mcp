@@ -147,7 +147,8 @@ fn outcome_str(outcome: &Outcome) -> &'static str {
 
 const INSTRUCTIONS: &str = "Query and control an openQA instance. Read tools inspect jobs, \
 machines, test suites, and products; mutating tools restart/cancel/delete jobs, comment, and \
-trigger ISOs, and require API credentials.";
+trigger ISOs, and require API credentials. clone_job copies a job and its dependencies with \
+setting overrides, e.g. to verify a test-code fix.";
 
 /// Denial text for both refusal paths. Deliberately identical and detail-free:
 /// a caller learns that it may not do this, not how the gate is wired.
@@ -894,6 +895,7 @@ mod router_tests {
         "release_worker",
         "reserve_worker_host",
         "release_worker_host",
+        "clone_job",
     ];
 
     fn names(router: &ToolRouter<OpenQaServer>) -> BTreeSet<String> {
@@ -916,7 +918,7 @@ mod router_tests {
 
     #[test]
     fn write_router_matches_readme_table() {
-        assert_eq!(WRITE_TOOL_NAMES.len(), 18);
+        assert_eq!(WRITE_TOOL_NAMES.len(), 19);
         let expected: BTreeSet<String> = WRITE_TOOL_NAMES
             .iter()
             .map(std::string::ToString::to_string)
@@ -927,7 +929,7 @@ mod router_tests {
     #[test]
     fn readonly_excludes_write_tools() {
         let full = OpenQaServer::read_tool_router() + OpenQaServer::write_tool_router();
-        assert_eq!(full.list_all().len(), 49);
+        assert_eq!(full.list_all().len(), 50);
     }
 
     // The scope gate reads `read_only_hint`, so an unannotated (or inverted)
