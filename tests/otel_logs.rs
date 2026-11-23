@@ -59,6 +59,17 @@ fn record_attrs(record: &Message) -> std::collections::HashMap<String, String> {
         .collect()
 }
 
+/// The raw `AnyValue` message of the attribute `key`, whatever its arm.
+fn record_attr_value(record: &Message, key: &str) -> Option<Message> {
+    record.all(6).into_iter().find_map(|field| {
+        let Field::Len(kv_bytes) = field else {
+            return None;
+        };
+        let kv = Message::parse(kv_bytes).ok()?;
+        (kv.str(1).as_deref() == Some(key)).then(|| kv.msg(2))?
+    })
+}
+
 fn record_stream(record: &Message) -> Option<String> {
     record_attrs(record).get("ruoqa.stream").cloned()
 }
@@ -104,7 +115,14 @@ async fn default_filter_passes_info_blocks_debug_and_excluded_targets() {
 
     let subscriber = tracing_subscriber::registry().with(telemetry.diagnostics_layer());
     tracing::subscriber::with_default(subscriber, || {
-        tracing::info!(target: "ruoqa_mcp::server", "an info event");
+        tracing::info!(
+            target: "ruoqa_mcp::server",
+            ok = false,
+            count = 0_i64,
+            ratio = 0.0_f64,
+            label = "",
+            "an info event"
+        );
         tracing::debug!(target: "ruoqa_mcp::server", "a debug event");
         tracing::info!(target: "reqwest", "an excluded event");
     });
@@ -131,6 +149,15 @@ async fn default_filter_passes_info_blocks_debug_and_excluded_targets() {
         vec![Some("an info event".to_string())],
         "the debug event and the excluded-target event must not have exported"
     );
+
+    // Zero values must keep their `AnyValue` oneof arm: an empty `AnyValue`
+    // would read as "no value".
+    let records = decode_log_records(&requests[1].body);
+    let value = |key| record_attr_value(&records[0], key).expect(key);
+    assert_eq!(value("ok").get(2), Some(&Field::Varint(0)));
+    assert_eq!(value("count").get(3), Some(&Field::Varint(0)));
+    assert_eq!(value("ratio").get(4), Some(&Field::Fixed64(0)));
+    assert_eq!(value("label").get(1), Some(&Field::Len(vec![])));
 
     unsafe {
         std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
