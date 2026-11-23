@@ -152,8 +152,8 @@ pub struct LogProducer {
 }
 
 impl LogProducer {
-    pub(crate) fn enqueue(&self, encoded_record: Vec<u8>) {
-        self.producer.enqueue(encoded_record);
+    pub(crate) fn enqueue(&self, encoded_record: Vec<u8>) -> bool {
+        self.producer.enqueue(encoded_record)
     }
 
     /// Whether the underlying export task is currently delivering, for the
