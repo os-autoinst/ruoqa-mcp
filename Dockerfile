@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1-alpine AS build
+FROM rust:1-alpine@sha256:8d0e82abfdf9a38071e07cabc5afba4ddbe077631a80e4e742a760c38beadc33 AS build
 RUN apk add --no-cache musl-dev cmake make perl clang-dev llvm-dev linux-headers g++
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
@@ -15,7 +15,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # needs the host directory owned by 65532 directly -- see compose.yaml.
 RUN install -d -m 0700 -o 65532 -g 65532 /audit
 
-FROM gcr.io/distroless/static-debian13:nonroot
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:8ce6dd87e9823c5b48dcfb2c8604714ccb351ce59607327bcc4957448da279b5
 ARG VERSION=dev
 LABEL org.opencontainers.image.source="https://github.com/os-autoinst/ruoqa-mcp" \
       org.opencontainers.image.description="MCP server exposing curated, typed tools over the openQA REST API" \
