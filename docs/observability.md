@@ -106,7 +106,9 @@ shared deployment defaults to the safer failure mode.
 A configured file sink *is* the persistence: as long as it is writable,
 delivery health of any OTLP bridge is irrelevant to the gate. Delivery
 health only matters when `path = "none"` — there, the audit stream's own
-OTLP export task's health *is* the persistence the gate watches.
+OTLP export task's health *is* the persistence the gate watches, and a record
+the export queue cannot accept (queue full or export task gone) counts as a
+failed append.
 
 A refused call fails exactly like any other tool error: `kind:
 "audit_unavailable"` in the ordinary `{"error": {...}}` shape, with the
