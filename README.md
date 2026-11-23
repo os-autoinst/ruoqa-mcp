@@ -334,7 +334,11 @@ credentials, so it is unavailable to a read-scope HTTP token even with
   without creating anything. Secret values (keys matching `^_SECRET_` or
   `_PASSWORD`, or the job's `_HIDE_SECRETS_REGEX`) show as `[redacted]` there,
   as openQA shows them to a non-operator; only the `redacted` warning says
-  which ones will really clone as `[redacted]`.
+  which ones will really clone as `[redacted]`. One deviation: openQA falls
+  back to the default rule for a `_HIDE_SECRETS_REGEX` it cannot compile, but
+  one this server cannot compile may be valid Perl (lookaround,
+  backreferences) that openQA does apply, so `dry_run` hides every value of
+  that job instead and lists its id under `warnings.unsupported_hide_regex`.
 - The reply is openQA's `ids` (original → new) plus `urls`, and optional
   `warnings`: `redacted` lists settings that still hold `[redacted]` (the
   credential cannot read secrets; they clone as `[redacted]`), and

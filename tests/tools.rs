@@ -2628,6 +2628,27 @@ async fn clone_job_dry_run_hides_secret_values_but_clones_them() {
 }
 
 #[tokio::test]
+async fn clone_job_dry_run_names_jobs_whose_hide_regex_does_not_compile() {
+    let mock = MockServer::start().await;
+    mount_clone_job(
+        &mock,
+        7,
+        json!({"settings": {"TEST": "t", "_HIDE_SECRETS_REGEX": "(?<=X)TOKEN", "API_TOKEN": "tok"}}),
+    )
+    .await;
+    let client = clone_server(&mock, None).await;
+
+    let result = call(&client, "clone_job", json!({"job_id": 7, "dry_run": true}))
+        .await
+        .expect("call_tool");
+
+    let reply = text(&result);
+    assert_eq!(reply["jobs"]["7"]["TEST"], "[redacted]");
+    assert_eq!(reply["jobs"]["7"]["API_TOKEN"], "[redacted]");
+    assert_eq!(reply["warnings"], json!({"unsupported_hide_regex": [7]}));
+}
+
+#[tokio::test]
 async fn clone_job_redacted_secret_warns_and_still_clones() {
     let mock = MockServer::start().await;
     mount_clone_job(

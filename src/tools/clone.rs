@@ -402,10 +402,17 @@ static SECRET_KEY: LazyLock<Regex> =
 /// The planned settings with secret values replaced by `[redacted]`, as
 /// openQA itself shows them without `unredacted=1`, so a dry run never hands
 /// out what the operator credential fetched. The original job's
-/// `_HIDE_SECRETS_REGEX` counts (an override cannot unhide a value); one this
-/// regex engine cannot compile hides every value of that job.
-pub(crate) fn redacted_settings(plan: &Plan, cache: &HashMap<i64, Job>) -> BTreeMap<i64, Settings> {
-    plan.settings
+/// `_HIDE_SECRETS_REGEX` counts (an override cannot unhide a value). openQA
+/// falls back to the default rule for a regex it cannot compile; one this
+/// engine cannot compile may be valid Perl that openQA applies, so it hides
+/// every value of that job instead. Those job ids are returned alongside.
+pub(crate) fn redacted_settings(
+    plan: &Plan,
+    cache: &HashMap<i64, Job>,
+) -> (BTreeMap<i64, Settings>, Vec<i64>) {
+    let mut opaque = Vec::new();
+    let shown = plan
+        .settings
         .iter()
         .map(|(id, settings)| {
             let custom = cache
@@ -413,6 +420,9 @@ pub(crate) fn redacted_settings(plan: &Plan, cache: &HashMap<i64, Job>) -> BTree
                 .and_then(|job| job.settings.get("_HIDE_SECRETS_REGEX"))
                 .filter(|re| !re.is_empty())
                 .map(|re| Regex::new(re).ok());
+            if matches!(custom, Some(None)) {
+                opaque.push(*id);
+            }
             let hidden = |key: &str| {
                 SECRET_KEY.is_match(key)
                     || custom
@@ -428,7 +438,8 @@ pub(crate) fn redacted_settings(plan: &Plan, cache: &HashMap<i64, Job>) -> BTree
                 .collect();
             (*id, settings)
         })
-        .collect()
+        .collect();
+    (shown, opaque)
 }
 
 /// Where a `github_ref` clone points the job's test code.
@@ -987,7 +998,8 @@ mod tests {
             .settings
             .extend(settings(&[("API_TOKEN", "shown")]));
         let p = run(42, opts(), &["_HIDE_SECRETS_REGEX="], &cache);
-        let shown = redacted_settings(&p, &cache);
+        let (shown, opaque) = redacted_settings(&p, &cache);
+        assert_eq!(opaque, Vec::<i64>::new());
         assert_eq!(shown[&42]["_SECRET_A"], "[redacted]");
         assert_eq!(shown[&42]["SCC_PASSWORD_X"], "[redacted]");
         assert_eq!(shown[&42]["API_TOKEN"], "[redacted]");
@@ -998,14 +1010,15 @@ mod tests {
     }
 
     #[test]
-    fn uncompilable_hide_regex_hides_every_value_of_the_job() {
+    fn uncompilable_hide_regex_hides_every_value_of_the_job_and_names_it() {
         let mut cache = cluster();
         cache.get_mut(&42).unwrap().settings.extend(settings(&[
             ("_HIDE_SECRETS_REGEX", "(?<=X)TOKEN"),
             ("API_TOKEN", "tok"),
         ]));
         let p = run(42, opts(), &[], &cache);
-        let shown = redacted_settings(&p, &cache);
+        let (shown, opaque) = redacted_settings(&p, &cache);
+        assert_eq!(opaque, [42]);
         assert!(shown[&42].values().all(|v| v == "[redacted]"));
         assert_eq!(shown[&41]["TEST"], "parent");
     }

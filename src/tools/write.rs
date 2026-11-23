@@ -625,7 +625,7 @@ warnings.",
             }
         };
 
-        let warnings = clone::warnings(&plan, &cache);
+        let mut warnings = clone::warnings(&plan, &cache);
         let dry_run = args.dry_run.unwrap_or(false);
         if !dry_run
             && !args.ignore_missing_assets.unwrap_or(false)
@@ -644,11 +644,12 @@ warnings.",
 
         let mut reply = Map::new();
         if dry_run {
+            let (jobs, opaque) = clone::redacted_settings(&plan, &cache);
             reply.insert("dry_run".into(), json!(true));
-            reply.insert(
-                "jobs".into(),
-                json!(clone::redacted_settings(&plan, &cache)),
-            );
+            reply.insert("jobs".into(), json!(jobs));
+            if !opaque.is_empty() {
+                warnings.get_or_insert_with(|| json!({}))["unsupported_hide_regex"] = json!(opaque);
+            }
         } else {
             let created = match self
                 .request_form(
