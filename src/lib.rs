@@ -75,29 +75,31 @@ impl Telemetry {
         self.0.shutdown().await;
     }
 
-    /// A send handle onto the logs pipeline, for [`audit::Auditor::with_otlp`]
-    /// to piggyback the audit stream on. `None` when the logs signal is not
+    /// A send handle onto the shared logs pipeline, for
+    /// [`audit::Auditor::with_otlp`]. `None` when the logs signal is not
     /// configured.
+    ///
+    /// With `path = "none"` the audit fail-closed gate reads this pipeline's
+    /// delivery health, which diagnostics traffic (a `RUST_LOG` burst) shares:
+    /// it can trip the gate. Prefer [`audit_producer`](Self::audit_producer)
+    /// there.
     #[must_use]
     pub fn log_producer(&self) -> Option<LogProducer> {
-        self.0.log_producer().map(|producer| LogProducer {
-            producer,
-            health: None,
-        })
+        self.0
+            .log_producer()
+            .map(|(producer, health)| LogProducer { producer, health })
     }
 
     /// A send handle onto the audit stream's own export task, plus its
-    /// delivery health, for [`audit::Auditor::with_otlp`]. `None` unless
+    /// delivery health, for [`audit::Auditor::with_otlp`]; the supported
+    /// handle when the audit stream is OTLP-only (`path = "none"`). `None` unless
     /// [`init_with_audit_stream`](Self::init_with_audit_stream) was called
     /// with `true` and the logs signal is configured.
     #[must_use]
     pub fn audit_producer(&self) -> Option<LogProducer> {
         self.0
             .audit_producer()
-            .map(|(producer, health)| LogProducer {
-                producer,
-                health: Some(health),
-            })
+            .map(|(producer, health)| LogProducer { producer, health })
     }
 
     /// A send handle onto the traces pipeline plus the resolved
@@ -140,15 +142,14 @@ impl Telemetry {
 /// piggyback on. No `Debug`: the records it carries may include tool
 /// arguments.
 ///
-/// `health` is `Some` only when this handle came from
-/// [`Telemetry::audit_producer`] — the audit stream's own dedicated export
-/// task; a handle from [`Telemetry::log_producer`] (the shared diagnostics
-/// pipeline) carries `None`, and [`Self::is_delivering`] always answers
-/// `true` for it, because nothing gates on the diagnostics stream's health.
+/// Carries the delivery health of the export task it feeds, so the audit
+/// gate can never treat an unwatched pipeline as healthy. That task is the
+/// audit stream's own for [`Telemetry::audit_producer`], the shared
+/// diagnostics pipeline's for [`Telemetry::log_producer`].
 #[derive(Clone)]
 pub struct LogProducer {
     producer: otel::pipeline::Producer,
-    health: Option<std::sync::Arc<otel::pipeline::Health>>,
+    health: std::sync::Arc<otel::pipeline::Health>,
 }
 
 impl LogProducer {
@@ -159,7 +160,7 @@ impl LogProducer {
     /// Whether the underlying export task is currently delivering, for the
     /// audit fail-closed gate.
     pub(crate) fn is_delivering(&self) -> bool {
-        self.health.as_ref().is_none_or(|h| h.is_delivering())
+        self.health.is_delivering()
     }
 }
 
@@ -168,9 +169,16 @@ impl LogProducer {
     /// Bypasses `Exporter::start`'s task/HTTP machinery, for `audit.rs`'s
     /// tests, which only need to observe what gets enqueued.
     pub(crate) fn for_test(tx: tokio::sync::mpsc::Sender<Vec<u8>>) -> Self {
+        Self::for_test_with_health(tx, otel::pipeline::Health::for_test())
+    }
+
+    pub(crate) fn for_test_with_health(
+        tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+        health: std::sync::Arc<otel::pipeline::Health>,
+    ) -> Self {
         Self {
             producer: otel::pipeline::Producer::for_test(tx),
-            health: None,
+            health,
         }
     }
 }

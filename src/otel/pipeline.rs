@@ -120,8 +120,9 @@ impl Dropped {
 pub(crate) type EncodeBatch = Arc<dyn Fn(&[Vec<u8>]) -> Vec<u8> + Send + Sync>;
 
 /// Whether a signal's export task is currently getting batches to the
-/// collector. Read by the audit fail-closed gate; the logs/traces/metrics
-/// exporters build one too (every `Exporter` does) but nothing reads theirs.
+/// collector. Read by the audit fail-closed gate through a `LogProducer`;
+/// the traces/metrics exporters build one too (every `Exporter` does) but
+/// nothing reads theirs.
 /// Starts `delivering = true`: the startup probe already proved the
 /// collector reachable, so a signal begins healthy, not suspect.
 pub(crate) struct Health {
@@ -155,6 +156,16 @@ impl Health {
     #[cfg(test)]
     pub(crate) fn consecutive_failures(&self) -> u64 {
         self.consecutive_failures.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Arc<Self> {
+        Arc::new(Self::new())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_failing(&self) {
+        self.fail();
     }
 }
 
