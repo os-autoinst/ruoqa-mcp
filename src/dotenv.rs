@@ -32,7 +32,8 @@ fn path() -> Option<PathBuf> {
 }
 
 /// `KEY=value` per line. Blank lines, `#` comments and lines without a `=` are
-/// skipped; the key and value are trimmed and one layer of matching quotes is
+/// skipped, as are lines with an empty key or a NUL byte (`set_var` panics on
+/// both); the key and value are trimmed and one layer of matching quotes is
 /// stripped from the value.
 #[must_use]
 pub fn parse(contents: &str) -> Vec<(String, String)> {
@@ -41,6 +42,9 @@ pub fn parse(contents: &str) -> Vec<(String, String)> {
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .filter_map(|line| line.split_once('='))
+        .filter(|(key, value)| {
+            !key.trim().is_empty() && !key.contains('\0') && !value.contains('\0')
+        })
         .map(|(key, value)| {
             let value = value.trim();
             let unquoted = value
@@ -75,6 +79,12 @@ mod tests {
             ]
             .map(|(k, v)| (k.to_string(), v.to_string()))
         );
+    }
+
+    #[test]
+    fn skips_empty_keys_and_nul_bytes() {
+        let parsed = parse("=foo\n  = bar\nA\0B=1\nC=d\0e\nOK=1\n");
+        assert_eq!(parsed, [("OK".to_string(), "1".to_string())]);
     }
 
     #[test]
