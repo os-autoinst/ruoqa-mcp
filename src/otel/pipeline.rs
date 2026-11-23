@@ -318,9 +318,9 @@ async fn run_task(
     health: Arc<Health>,
 ) {
     let mut batch: Vec<Vec<u8>> = Vec::new();
+    let sleep = tokio::time::sleep(schedule_delay);
+    tokio::pin!(sleep);
     loop {
-        let sleep = tokio::time::sleep(schedule_delay);
-        tokio::pin!(sleep);
         tokio::select! {
             biased;
             () = cancel.cancelled() => break,
@@ -330,6 +330,10 @@ async fn run_task(
             received = rx.recv() => {
                 match received {
                     Some(record) => {
+                        // The deadline runs from the batch's first record, not the latest.
+                        if batch.is_empty() {
+                            sleep.as_mut().reset(tokio::time::Instant::now() + schedule_delay);
+                        }
                         batch.push(record);
                         if batch.len() >= max_export_batch_size {
                             export(&client, &endpoint, &headers, timeout, &encode_batch, &mut batch, &dropped, &health).await;
@@ -630,6 +634,47 @@ mod tests {
         );
 
         exporter.shutdown(Duration::from_millis(50)).await;
+    }
+
+    /// Records trickling in below the batch size must still leave within
+    /// `schedule_delay` of the first one, not wait for the batch to fill.
+    #[tokio::test]
+    async fn steady_trickle_still_exports_within_schedule_delay() {
+        let collector = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200))
+            .mount(&collector)
+            .await;
+
+        let queue = QueueConfig {
+            max_queue_size: 64,
+            max_export_batch_size: 512,
+            schedule_delay: Duration::from_millis(200),
+        };
+        let client = reqwest::Client::new();
+        let endpoint = Url::parse(&format!("{}/v1/logs", collector.uri())).unwrap();
+        let encode_batch: EncodeBatch = Arc::new(|records: &[Vec<u8>]| records.concat());
+        let exporter = Exporter::start(
+            client,
+            endpoint,
+            HeaderMap::new(),
+            Duration::from_secs(1),
+            queue,
+            encode_batch,
+        );
+
+        let producer = exporter.producer();
+        for i in 0..16u8 {
+            producer.enqueue(vec![i]);
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let received = collector.received_requests().await.unwrap();
+        assert!(
+            !received.is_empty(),
+            "nothing exported within 800 ms of a 200 ms schedule delay"
+        );
+
+        exporter.shutdown(Duration::from_millis(500)).await;
     }
 
     /// The gate's precondition: `Health` starts delivering, goes false on a
