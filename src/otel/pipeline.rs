@@ -48,6 +48,9 @@ pub(crate) fn excluded(target: &str) -> bool {
 
 const MAX_SEND_ATTEMPTS: u32 = 3;
 const RETRY_BACKOFF: Duration = Duration::from_secs(1);
+/// Ceiling on a collector-supplied `Retry-After`, so a hostile or broken value
+/// cannot park the export task.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// Closed-vocabulary reason a record never reached the collector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -325,7 +328,7 @@ async fn run_task(
             biased;
             () = cancel.cancelled() => break,
             () = &mut sleep, if !batch.is_empty() => {
-                export(&client, &endpoint, &headers, timeout, &encode_batch, &mut batch, &dropped, &health).await;
+                export(&cancel, &client, &endpoint, &headers, timeout, &encode_batch, &mut batch, &dropped, &health).await;
             }
             received = rx.recv() => {
                 match received {
@@ -336,7 +339,7 @@ async fn run_task(
                         }
                         batch.push(record);
                         if batch.len() >= max_export_batch_size {
-                            export(&client, &endpoint, &headers, timeout, &encode_batch, &mut batch, &dropped, &health).await;
+                            export(&cancel, &client, &endpoint, &headers, timeout, &encode_batch, &mut batch, &dropped, &health).await;
                         }
                     }
                     None => break,
@@ -351,6 +354,7 @@ async fn run_task(
     }
     if !batch.is_empty() {
         export(
+            &cancel,
             &client,
             &endpoint,
             &headers,
@@ -369,6 +373,7 @@ async fn run_task(
     reason = "internal task helper, not a public API"
 )]
 async fn export(
+    cancel: &CancellationToken,
     client: &reqwest::Client,
     endpoint: &Url,
     headers: &HeaderMap,
@@ -382,19 +387,18 @@ async fn export(
     let count = records.len() as u64;
     let body = encode_batch(&records);
 
-    match send_with_retry(client, endpoint, headers, timeout, body).await {
-        Ok(()) => health.ok(),
-        Err(e) => {
-            // The response body/error is deliberately not logged: an
-            // endpoint may carry credentials in its userinfo.
-            let reason = match e {
-                SendError::Network => DropReason::Network,
-                SendError::HttpStatus(_) => DropReason::HttpStatus,
-            };
-            dropped.record(reason, count);
-            health.fail();
-        }
-    }
+    // The response body/error is deliberately not logged: an endpoint may
+    // carry credentials in its userinfo.
+    let reason = match send_with_retry(client, endpoint, headers, timeout, body, Some(cancel)).await
+    {
+        Ok(()) => return health.ok(),
+        // Shutdown cut the backoff short; the collector did nothing wrong.
+        Err(SendError::Cancelled) => return dropped.record(DropReason::Shutdown, count),
+        Err(SendError::Network) => DropReason::Network,
+        Err(SendError::HttpStatus(_)) => DropReason::HttpStatus,
+    };
+    dropped.record(reason, count);
+    health.fail();
 }
 
 /// Why a POST never succeeded, after bounded retry. Carries just enough to
@@ -403,6 +407,7 @@ async fn export(
 pub(crate) enum SendError {
     Network,
     HttpStatus(u16),
+    Cancelled,
 }
 
 impl fmt::Display for SendError {
@@ -410,20 +415,23 @@ impl fmt::Display for SendError {
         match self {
             SendError::Network => write!(f, "network error"),
             SendError::HttpStatus(status) => write!(f, "HTTP status {status}"),
+            SendError::Cancelled => write!(f, "cancelled"),
         }
     }
 }
 
 /// POSTs `body` as `application/x-protobuf`, retrying connection errors and
-/// 429/502/503/504 responses (honouring `Retry-After` when present) up to
-/// [`MAX_SEND_ATTEMPTS`]. No jitter: one client, no herd of them to
-/// desynchronise.
+/// 429/502/503/504 responses (honouring `Retry-After` when present, capped at
+/// [`MAX_RETRY_AFTER`]) up to [`MAX_SEND_ATTEMPTS`]. No jitter: one client, no
+/// herd of them to desynchronise. `cancel` cuts a backoff short (the request
+/// in flight is bounded by `timeout` instead).
 pub(crate) async fn send_with_retry(
     client: &reqwest::Client,
     endpoint: &Url,
     headers: &HeaderMap,
     timeout: Duration,
     body: Vec<u8>,
+    cancel: Option<&CancellationToken>,
 ) -> Result<(), SendError> {
     let mut attempt = 0u32;
     loop {
@@ -448,22 +456,37 @@ pub(crate) async fn send_with_retry(
                 }
                 let retryable = matches!(status.as_u16(), 429 | 502 | 503 | 504);
                 if retryable && attempt < MAX_SEND_ATTEMPTS {
-                    let delay = response
-                        .headers()
-                        .get(RETRY_AFTER)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| v.parse::<u64>().ok())
-                        .map_or(RETRY_BACKOFF, Duration::from_secs);
-                    tokio::time::sleep(delay).await;
+                    backoff(retry_delay(response.headers().get(RETRY_AFTER)), cancel).await?;
                     continue;
                 }
                 return Err(SendError::HttpStatus(status.as_u16()));
             }
-            Err(_) if attempt < MAX_SEND_ATTEMPTS => {
-                tokio::time::sleep(RETRY_BACKOFF).await;
-            }
+            Err(_) if attempt < MAX_SEND_ATTEMPTS => backoff(RETRY_BACKOFF, cancel).await?,
             Err(_) => return Err(SendError::Network),
         }
+    }
+}
+
+fn retry_delay(header: Option<&HeaderValue>) -> Duration {
+    header
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .map_or(RETRY_BACKOFF, |secs| {
+            Duration::from_secs(secs).min(MAX_RETRY_AFTER)
+        })
+}
+
+async fn backoff(delay: Duration, cancel: Option<&CancellationToken>) -> Result<(), SendError> {
+    let cancelled = async {
+        match cancel {
+            Some(token) => token.cancelled().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        biased;
+        () = cancelled => Err(SendError::Cancelled),
+        () = tokio::time::sleep(delay) => Ok(()),
     }
 }
 
@@ -675,6 +698,66 @@ mod tests {
         );
 
         exporter.shutdown(Duration::from_millis(500)).await;
+    }
+
+    #[test]
+    fn retry_delay_caps_huge_retry_after() {
+        let huge = HeaderValue::from_static("99999999");
+        assert_eq!(retry_delay(Some(&huge)), MAX_RETRY_AFTER);
+        let small = HeaderValue::from_static("3");
+        assert_eq!(retry_delay(Some(&small)), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn retry_delay_defaults_on_garbage() {
+        let garbage = HeaderValue::from_static("soon");
+        assert_eq!(retry_delay(Some(&garbage)), RETRY_BACKOFF);
+        assert_eq!(retry_delay(None), RETRY_BACKOFF);
+    }
+
+    /// A collector asking for an absurd `Retry-After` must not hold the task
+    /// past shutdown: cancellation interrupts the backoff.
+    #[tokio::test]
+    async fn huge_retry_after_does_not_wedge_shutdown() {
+        let collector = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(503).insert_header("Retry-After", "99999999"),
+            )
+            .mount(&collector)
+            .await;
+
+        let queue = QueueConfig {
+            max_queue_size: 8,
+            max_export_batch_size: 1,
+            schedule_delay: Duration::from_secs(3600),
+        };
+        let client = reqwest::Client::new();
+        let endpoint = Url::parse(&format!("{}/v1/logs", collector.uri())).unwrap();
+        let encode_batch: EncodeBatch = Arc::new(|records: &[Vec<u8>]| records.concat());
+        let exporter = Exporter::start(
+            client,
+            endpoint,
+            HeaderMap::new(),
+            Duration::from_secs(1),
+            queue,
+            encode_batch,
+        );
+
+        exporter.producer().enqueue(vec![1]);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let start = std::time::Instant::now();
+        let dropped = Arc::clone(&exporter.dropped);
+        exporter.shutdown(Duration::from_secs(5)).await;
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "shutdown waited out the backoff: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(dropped.get(DropReason::Shutdown), 1);
+        assert_eq!(dropped.get(DropReason::Network), 0);
+        assert_eq!(dropped.get(DropReason::HttpStatus), 0);
     }
 
     /// The gate's precondition: `Health` starts delivering, goes false on a
